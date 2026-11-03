@@ -14,3 +14,4 @@ config.toml
 .idea/
 .vscode/
 .DS_Store
+testserver-ca.pem
