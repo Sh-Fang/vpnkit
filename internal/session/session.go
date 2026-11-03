@@ -19,6 +19,7 @@ import (
 	"github.com/Sh-Fang/vpnkit/internal/command"
 	"github.com/Sh-Fang/vpnkit/internal/logx"
 	"github.com/Sh-Fang/vpnkit/internal/platform"
+	"github.com/Sh-Fang/vpnkit/internal/route"
 	"github.com/Sh-Fang/vpnkit/internal/tunnel"
 	"github.com/Sh-Fang/vpnkit/internal/vpnerr"
 	"github.com/Sh-Fang/vpnkit/pkg/wire"
@@ -51,28 +52,9 @@ type AuthAPI interface {
 	FetchResources(ctx context.Context, token string) (auth.Resources, error)
 }
 
-// NetPlan 是要下发到系统的分流配置（docs/07）。
-type NetPlan struct {
-	Device      string
-	TapIP       netip.Addr
-	MTU         int
-	Routes      []netip.Prefix
-	Bypass      []netip.Addr // 隧道服务端地址，防回环（docs/07 §2.2）
-	DNSServers  []netip.Addr
-	DNSSuffixes []string
-}
-
-// NetResult 是下发结果；部分网段失败不算整体失败（docs/07 §2.4）。
-type NetResult struct {
-	RoutesOK     []netip.Prefix
-	RoutesFailed []string
-	DNSEnabled   bool
-	Warnings     []string
-}
-
 // Network 是 session 对路由/DNS 层的依赖。Apply 失败时必须已自行回滚；Teardown 必须幂等。
 type Network interface {
-	Apply(ctx context.Context, p NetPlan) (NetResult, error)
+	Apply(ctx context.Context, p route.Plan) (route.Result, error)
 	Teardown(ctx context.Context) error
 }
 
@@ -645,7 +627,7 @@ func (s *Session) configure(ctx context.Context, msg []byte, p *prepared) (wire.
 		s.update(func(x *Status) { x.Device = name })
 		go s.devReader(dev)
 	}
-	res, err := s.o.Network.Apply(ctx, NetPlan{
+	res, err := s.o.Network.Apply(ctx, route.Plan{
 		Device: s.devName, TapIP: sip.TapIP, MTU: p.mtu, Routes: p.routes,
 		Bypass: p.bypass, DNSServers: p.dnsServers, DNSSuffixes: p.suffixes,
 	})
@@ -930,4 +912,14 @@ func (s *Session) teardown() {
 		_ = s.dev.Close()
 		s.dev = nil
 	}
+}
+
+// DryRun 只执行认证阶段（拉 conf/rclist、解析隧道地址），返回将要下发的计划。
+// 不建立任何隧道连接（AGENTS.md §4：--dry-run 不发隧道流量）。Device 与 TapIP 由调用方填占位。
+func (s *Session) DryRun(ctx context.Context) (route.Plan, error) {
+	p, err := s.prepare(ctx)
+	if err != nil {
+		return route.Plan{}, err
+	}
+	return route.Plan{MTU: p.mtu, Routes: p.routes, Bypass: p.bypass, DNSServers: p.dnsServers, DNSSuffixes: p.suffixes}, nil
 }

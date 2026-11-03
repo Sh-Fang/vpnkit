@@ -17,6 +17,7 @@ import (
 	"github.com/Sh-Fang/vpnkit/internal/command"
 	"github.com/Sh-Fang/vpnkit/internal/logx"
 	"github.com/Sh-Fang/vpnkit/internal/platform"
+	"github.com/Sh-Fang/vpnkit/internal/route"
 	"github.com/Sh-Fang/vpnkit/internal/tunnel"
 	"github.com/Sh-Fang/vpnkit/internal/vpnerr"
 	"github.com/Sh-Fang/vpnkit/pkg/wire"
@@ -44,19 +45,19 @@ func (f *fakeAuth) FetchResources(context.Context, string) (auth.Resources, erro
 
 type fakeNet struct {
 	mu        sync.Mutex
-	applies   []NetPlan
+	applies   []route.Plan
 	teardowns int
 	failApply bool
 }
 
-func (f *fakeNet) Apply(_ context.Context, p NetPlan) (NetResult, error) {
+func (f *fakeNet) Apply(_ context.Context, p route.Plan) (route.Result, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failApply {
-		return NetResult{}, errors.New("route add failed")
+		return route.Result{}, errors.New("route add failed")
 	}
 	f.applies = append(f.applies, p)
-	return NetResult{RoutesOK: p.Routes, DNSEnabled: len(p.DNSSuffixes) > 0}, nil
+	return route.Result{RoutesOK: p.Routes, DNSEnabled: len(p.DNSSuffixes) > 0}, nil
 }
 
 func (f *fakeNet) Teardown(context.Context) error {
