@@ -1,0 +1,183 @@
+# 03 · 隧道协议
+
+隧道复用 443 端口，与普通 HTTPS 共存。**握手不是标准 TLS 协商**：客户端发送固定的握手模板完成会话恢复。
+
+## 1. 前提
+
+- 服务端地址与端口来自 `conf.csp`（`svpnhost` / `svpnport`）
+- 认证已完成，持有 16 字节会话令牌
+
+## 2. 握手模板
+
+### 2.1 ClientHello（82 字节）
+
+```
+16 03 01 00 4d 01 00 00 49 03 01 46 83 74 24 01
+43 16 29 1f 95 3e c9 63 b9 fc b6 16 00 aa 20 15
+eb 75 07 59 40 8b 8d 0c e1 60 43 20 b1 65 f6 7f
+5a 6d 2c 54 d2 71 69 97 72 58 65 c3 40 9a 8a 0f
+cd 81 d8 2e db 7b 8f f7 1b c1 80 c6 00 02 00 39
+01 00
+```
+
+结构（供校验，实现时直接用上面的字节数组）：
+
+```
+16 03 01 00 4d          record: handshake, version TLS1.0, len=77
+  01 00 00 49           ClientHello, len=73
+    03 01               client_version
+    46 83 74 24 …       random, 32 B
+    20 …                session_id_len=32 + 32 B 固定会话 ID
+    00 02 00 39         cipher_suites_len=2, {0x0039}
+    01 00               compression_methods: null
+```
+
+自洽校验：`5 + 77 == 82` 且 `9 + 73 == 82`。
+
+### 2.2 ChangeCipherSpec + Finished（43 字节）
+
+```
+14 03 01 00 01 01 16 03 01 00 20 2b d1 df 0e e2
+4c da 7a 36 0e de 24 81 b9 79 32 67 8f f2 88 8c
+ef a3 7e 50 1c 09 6b 09 9c 5a 0d
+```
+
+结构：
+
+```
+14 03 01 00 01 01       ChangeCipherSpec
+16 03 01 00 20 <32 B>   Finished（固定值）
+```
+
+`6 + 5 + 32 == 43`。
+
+### 2.3 设计含义
+
+这两段是**预置会话凭证**：客户端不生成随机数、不做密钥交换，直接用一段既有的会话继续。
+等价于把会话票据预先烧进客户端，因此**服务端必须保留对应会话状态**才能接受。
+
+由此带来的工程约束：
+
+- 握手字节一个都不能改（改了就是另一个会话）
+- 客户端不需要 TLS 库，不需要 RC4 之外的任何密码原语
+- 服务端会话过期会导致握手被拒，此时只能重新走认证再试
+
+### 2.4 TODO(待实测)
+
+> 这两个模板是否被目标网关接受，**无法离线判定**。实现时把它做成可替换资源
+> （`internal/tunnel/templates.go`），并在失败时给出专门的错误码 `ErrHandshakeRejected`，
+> 便于联调期快速定位是不是模板失效。
+
+## 3. 连接时序
+
+| # | 动作 | 长度 | 方向 |
+|---|---|---|---|
+| 1 | 建 TCP 连接 | — | → |
+| 2 | 发 ClientHello | 82 | → |
+| 3 | 收服务端响应 | 122 | ← |
+| 4 | 发 CCS + Finished | 43 | → |
+| 5 | 发 clientMsg | 76 | → |
+| 6 | 收 serverMsg | 40 | ← |
+| 7 | 校验 serverMsg，置就绪 | — | — |
+
+要点：
+
+- 第 3 步的 **122 字节读完即丢弃**，不做任何校验。实现时也必须读完再丢弃（不读会阻塞后续写）。
+- 第 6 步才是真正的成败判定。
+- 所有长度都是固定值，不要用「读到 EOF 为止」的方式读。
+
+## 4. 两个消息格式
+
+### 4.1 clientMsg（76 字节）
+
+```
+off  len  值
+0    1    0x17
+1    1    0x03
+2    1    0x01
+3    1    0x00
+4    1    0x3c
+5    3    00 00 00
+8    4    "JJYY"          魔数
+12   4    conn_type       小端 u32
+16   32   00
+48   16   session_token   16 字节会话令牌
+64   8    00
+72   4    尾部标志        网络序（大端）u32
+```
+
+尾部标志取值：
+
+| conn_type | 偏移 72 |
+|---|---|
+| < 2 | `0xFFFFFFFF`（并返回错误，见下） |
+| 5 / 6 / 7 / 8 | `htonl(arg)`，`arg` 由调用方给 |
+| 其他 | `0` |
+
+`conn_type < 2` 时实现应直接报错，不要发出该报文。
+
+### 4.2 serverMsg（40 字节）
+
+```
+off 0..3   "AABB"
+off 4..7   状态码（小端 int32）
+off 8..39  命令参数（见 docs/04）
+```
+
+`[0:4] != "AABB"` → 握手失败，返回 `ErrBadServerMsg`。
+
+### 4.3 连接类型
+
+| conn_type | 用途 | 应答状态码 |
+|---|---|---|
+| < 2 | 控制通道（命令） | — 交给命令分发 |
+| 5、8 | 下行（读流） | 2 |
+| 6、7 | 上行（写流） | 1 |
+
+控制通道与数据通道各自建连、各自走一遍上面的时序。
+
+## 5. 数据帧
+
+数据通道上每个包：
+
+```
++0   u32  opcode
++4   u32  整包长度（含头，小端）
++8   u32  保留
++12  ...  裸 IPv4 包，RC4 加密
+```
+
+- 12 字节头**不加密**，原样发出
+- 只有 `[12:]` 经过 RC4
+- RC4 状态**跨包连续**，不能每包重置（见 `docs/05` §3）
+
+发送路径：
+
+```go
+body := pkt[12:]
+rc4.XORKeyStream(body, body)   // 就地
+conn.Write(pkt)                // 整包发出
+```
+
+接收路径：
+
+```go
+// 先读 12 字节头，得到 length，再读 length-12 字节体
+rc4.XORKeyStream(body, body)
+tun.Write(body)
+```
+
+## 6. 实现的纯函数边界
+
+`pkg/wire` 应只包含这些无副作用函数，便于表驱动测试：
+
+```go
+func BuildClientHello() []byte                                            // 返回 82 B 副本
+func BuildCCSFinished() []byte                                           // 返回 43 B 副本
+func BuildClientMsg(connType uint32, token [16]byte, arg uint32) ([]byte, error)
+func ParseServerMsg(b []byte) (status int32, payload []byte, err error)
+func BuildDataFrame(opcode uint32, ipPacket []byte) []byte
+func ParseDataFrame(b []byte) (opcode uint32, ipPacket []byte, err error)
+```
+
+全部函数返回**新分配的切片**，调用方可以自由修改。不要返回内部全局变量。

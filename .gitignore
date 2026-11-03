@@ -1,0 +1,16 @@
+# 本地配置与运行时状态（含令牌，绝不入库）
+*.local.*
+session*.json
+device-id
+state.json
+config.toml
+
+# 构建产物
+/bin/
+/dist/
+*.exe
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
