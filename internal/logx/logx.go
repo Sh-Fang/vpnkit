@@ -120,13 +120,13 @@ func Or(l *slog.Logger) *slog.Logger {
 
 // Trace 以 trace 级记录。
 func Trace(l *slog.Logger, msg string, args ...any) {
-	l.Log(context.Background(), LevelTrace, msg, args...)
+	Or(l).Log(context.Background(), LevelTrace, msg, args...)
 }
 
 // Assumption 记录一个待实测假设点的取值（AGENTS.md §6，docs/11 §8.2）。
 // 联调后 grep assumption= 即可还原本次运行依赖的全部假设。
 func Assumption(l *slog.Logger, key string, value any, args ...any) {
-	l.Debug("using assumption", append([]any{"assumption", key, "value", value}, args...)...)
+	Or(l).Debug("using assumption", append([]any{"assumption", key, "value", value}, args...)...)
 }
 
 // Mask 掩码敏感值：保留首尾各 4 字符（AGENTS.md §4）。
