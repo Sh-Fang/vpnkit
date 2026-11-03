@@ -17,6 +17,10 @@
 | `golang.org/x/sys` | 平台系统调用 | 必需 |
 | `golang.zx2c4.com/wireguard/tun` | 三平台 TUN 抽象 | 强烈建议 |
 
+版本说明：`golang.zx2c4.com/wireguard` 固定在 `v0.0.0-20231211153847-12269c276173`。更新的版本要求 Go 1.23.1，
+与本表"Go 1.22 或更新"冲突。只 import `tun` 子包，传递依赖为 `golang.org/x/net`、`golang.zx2c4.com/wintun`，
+不会编入 gvisor 或 wireguard 协议实现。升级前先确认其 `go` 指令。
+
 其余一律用标准库。**不要**引入：
 
 - `gvisor`、`lwip`、任何用户态 TCP/IP 栈（本项目承载裸 IP，不需要）
@@ -72,7 +76,9 @@ CI 顺序：`vet` → `test -race` → `build`（全平台矩阵）。
 ## 6. Windows 的 wintun.dll
 
 若使用建议的 TUN 库，dll 通过 `//go:embed` 内嵌，运行时释放到临时目录。
-注意：
+
+**当前实现未内嵌**（仓库不携带第三方二进制）：发布 Windows 产物时把 wintun.dll 与 exe 放在同一目录。
+将来内嵌时注意：
 
 - 释放路径用 `os.MkdirTemp` 生成，退出时删除
 - 不要在只读目录里释放

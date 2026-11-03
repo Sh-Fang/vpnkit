@@ -41,6 +41,19 @@ go build -o vpnkit ./cmd/vpnkit
 
 `up` / `down` 需要 root（macOS/Linux）或管理员（Windows）。加 `--dry-run` 只打印将要执行的路由与 DNS 变更，不落盘。
 
+### 不需要真实网关的本地试跑
+
+```bash
+make build testserver
+./bin/testserver --script happy &          # 假网关：https 127.0.0.1:8443，隧道 127.0.0.1:8444
+VPNKIT_PASSWORD=secret ./bin/vpnkit login --server 127.0.0.1:8443 --ca-file testserver-ca.pem --user alice
+./bin/vpnkit up --dry-run --server 127.0.0.1:8443 --ca-file testserver-ca.pem
+./bin/vpnkit up --fake-tun --verbose --server 127.0.0.1:8443 --ca-file testserver-ca.pem   # 无需 root
+./bin/vpnkit status; ./bin/vpnkit down
+```
+
+`--fake-tun` 用内存 TUN、路由/DNS 只打印不执行，只用于测试协议与状态机。
+
 ---
 
 ## 设计原则
@@ -78,10 +91,23 @@ vpnkit/
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | P0 | 文档与协议规格 | ✅ 完成（本套文档） |
-| P1 | 认证链路 | 待实现 |
-| P2 | 隧道建立（控制通道） | 待实现 |
-| P3 | 路由分流 + 内网可达 | 待实现 |
-| P4 | DNS 分区 | 待实现 |
-| P5 | UDP 承载与性能调优 | 待实现 |
+| P1 | 认证链路 | ✅ 已实现，testserver 验收通过 |
+| P2 | 隧道建立（控制通道） | ✅ 已实现，testserver 验收通过 |
+| P3 | 路由分流 + 内网可达 | 🟡 已实现；命令生成与 dry-run 已验证，真实 TUN/路由待 root 环境验证 |
+| P4 | DNS 分区 | 🟡 已实现；同上，待 root 环境验证 |
+| P5 | UDP 承载与性能调优 | 待实现（`--transport udp` 目前回退 TCP 并告警） |
+
+真机联调前请先看 `docs/12` 末尾的联调检查表：所有待实测假设点都会以 `assumption=<key>` 记入日志。
 
 详见 [docs/12-roadmap.md](docs/12-roadmap.md)。
+
+---
+
+## 安全声明
+
+照录 `docs/05` §4，不做美化：
+
+1. 握手使用预置会话凭证，**不做前向保密**。
+2. RC4 已被密码学界证明不再安全，且此处密钥可由程序本身确定。
+3. 因此这套加密**只提供流量混淆，不提供机密性**。任何拿到本程序或能抓包的人都能还原内容。
+4. 不要把本工具用于传输确实需要保密的数据；它的价值在**分流与易用性**，不在加密。

@@ -12,7 +12,7 @@
 
 ---
 
-## P1 · 认证链路（2–3 天）
+## P1 · 认证链路（2–3 天） ✅
 
 **范围**：`internal/auth`、`cmd/vpnkit` 的 `login` / `logout`。
 
@@ -26,17 +26,17 @@
 
 **DoD**
 
-- [ ] 对 `testserver` 完成登录，密码被正确解密校验通过
-- [ ] 令牌文件权限 `0600`
-- [ ] 密码不出现在 `ps`、日志、配置中
-- [ ] 401 → 退出码 3
-- [ ] `devid show` / `devid pin` 可用，输出符合 `[0-9A-F]{32}`
+- [x] 对 `testserver` 完成登录，密码被正确解密校验通过
+- [x] 令牌文件权限 `0600`
+- [x] 密码不出现在 `ps`、日志、配置中
+- [x] 401 → 退出码 3
+- [x] `devid show` / `devid pin` 可用，输出符合 `[0-9A-F]{32}`
 
 **风险**：公钥位置在不同网关上不一致 → 两处都取，以最后一次为准。
 
 ---
 
-## P2 · 隧道建立（3–5 天）
+## P2 · 隧道建立（3–5 天） ✅
 
 **范围**：`pkg/wire`、`internal/tunnel`、`internal/command`。
 
@@ -51,18 +51,18 @@
 
 **DoD**
 
-- [ ] 对 `testserver` 完成握手，进入 `Running`
-- [ ] `--verbose` 打印五段长度正确
-- [ ] `bad-magic` 剧本 → 明确错误，退出码 4
-- [ ] `kick` 剧本 → `Stopped`，退出码 7，不重连
-- [ ] `busy-then-ok` 剧本 → 退避后成功
-- [ ] `go test -race` 无数据竞争
+- [x] 对 `testserver` 完成握手，进入 `Running`
+- [x] `--verbose` 打印五段长度正确
+- [x] `bad-magic` 剧本 → 明确错误，退出码 4
+- [x] `kick` 剧本 → `Stopped`，退出码 7，不重连
+- [x] `busy-then-ok` 剧本 → 退避后成功
+- [x] `go test -race` 无数据竞争
 
 **风险**：握手模板可能已失效（`docs/03` §2.4）。若真机被拒，单独记录为 `ErrHandshakeRejected`，不要在其他逻辑里混淆。
 
 ---
 
-## P3 · 分流（3–4 天）
+## P3 · 分流（3–4 天） 🟡 待 root 验证
 
 **范围**：`internal/route`、`internal/platform/tun`。
 
@@ -87,7 +87,7 @@
 
 ---
 
-## P4 · DNS 分区（2 天）
+## P4 · DNS 分区（2 天） 🟡 待 root 验证
 
 **范围**：`internal/route/dns_*.go`。
 

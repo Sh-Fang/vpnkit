@@ -9,7 +9,7 @@
 | 1 | `GET /por/login_auth.csp` | 取会话令牌、RSA 公钥、CSRF 随机码 | ✅ |
 | 2 | `GET /public/psw_config` | 再取一次公钥与 CSRF 码（部分网关以此为准） | 可选 |
 | 3 | `POST /por/login_psw.csp?anti_replay=1&encrypt=1` | 提交账号与密码密文 | ✅ |
-| 4 | 后续所有请求 | 带 `TWFID: <令牌>` 请求头 | ✅ |
+| 4 | 后续所有请求 | 带 `TWFID: <令牌>` 请求头（实现同时带 `Cookie: TWFID=<令牌>`，常见网关读 Cookie） | ✅ |
 | 5 | `GET /por/conf.csp` | 全局配置（线路、带宽、隧道参数） | ✅ |
 | 6 | `GET /por/rclist.csp` | 资源列表（内网网段与内网域名后缀的唯一来源，`docs/09` §4） | ✅ |
 
@@ -80,7 +80,15 @@ send_rand_code = false       # 未启用图形验证码时
 登录成功后响应里会回写新的 `TwfID`。判定规则：
 
 1. HTTP 200
-2. 响应体包含新的令牌，且与请求前不同
+2. 响应体（或 `Set-Cookie: TWFID`）包含新的令牌，且与请求前不同
+
+TODO(待实测)：若响应沿用原令牌但带明确成功码（`Result=1` 或 `ErrorCode=1`），实现放行并打 warn 与
+`assumption=login_same_twfid`，避免把成功误判为失败。
+
+图形验证码：`RndImg=1` 时当前版本直接报错（退出码 3），暂不支持拉取验证码图片；`--captcha` 仅用于已知验证码的场景。
+
+证书：网关多为自签证书。默认**校验**证书；用 `server.ca_file`（或 `--ca-file`）信任指定 CA，
+确认网络可信时才用 `server.insecure = true`（或 `--insecure`），后者会打 warn。
 
 失败时通常返回一个错误码字段与可读消息。要求：
 

@@ -10,7 +10,7 @@
 | 提权 | root | root 或 `CAP_NET_ADMIN` | 管理员 |
 | 路由工具 | `route` | `ip` | `netsh` |
 | DNS 分区 | `/etc/resolver/` | systemd-resolved | NRPT |
-| 打包 | 单二进制 | 单二进制 | 单 exe（内嵌 wintun.dll） |
+| 打包 | 单二进制 | 单二进制 | 单 exe + 同目录 wintun.dll（暂未内嵌，见 §2.4） |
 
 ## 2. TUN 设备
 
@@ -43,6 +43,7 @@
 - Wintun 需要管理员权限创建适配器
 - 适配器名固定为 `vpnkit`，便于路由命令引用
 - 内嵌 dll：`//go:embed wintun.dll`，启动时释放到临时目录并 `LoadLibrary`（该库已封装）
+  - **当前实现未内嵌**：仓库不携带第三方二进制，`wintun.dll` 需从 wintun.net 获取并放在 `vpnkit.exe` 同目录；`doctor` 会检查
 - 卸载残留适配器：`netsh wintun delete` 不可用，靠库的 cleanup
 
 ## 3. 权限检测

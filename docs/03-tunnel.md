@@ -144,6 +144,10 @@ off 8..39  命令参数（见 docs/04）
 
 数据通道建连时 serverMsg 偏移 4 的值是**应答码**，与控制通道上的命令码同位不同义（见 `GLOSSARY.md`）。
 
+TODO(待实测)：选哪一个 conn_type、尾部 `arg` 填什么，原始资料未给出。实现约定：上行默认 6、下行默认 5
+（`tunnel.data_conn_up` / `data_conn_down`），`arg` 填 `SEND_IP` 分配的 `tapip`（网络序 u32），
+建连时打 `assumption=data_conn`。应答码不符时报 `ErrUnexpectedAck`，附 serverMsg hex。
+
 控制通道与数据通道各自建连、各自走一遍上面的时序。
 
 ## 5. 数据帧

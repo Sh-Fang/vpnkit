@@ -64,7 +64,7 @@ device_id = upper(hex(md5(plaintext)))
 
 - 读到即用，**不校验来源**
 - 文件内容非法（长度/字符集不符）时视为不存在，重新计算
-- `devid pin <value>` 写入指定值；`devid show` 打印当前值
+- `devid pin <value>` 写入指定值；`devid pin` 不带值时固化本机当前算出的值（§5 推荐用法）；`devid show` 打印当前值及来源
 
 ## 5. 本机标识持久化（重要）
 
@@ -89,6 +89,8 @@ device_id = upper(hex(md5(plaintext)))
 设备标识可反推硬件信息（MAC 前缀含厂商）。因此：
 
 - 只在登录流程中发送，不做其他用途；是否发送由 `auth.send_device_id` 决定（`docs/09` §3）
+- 登录表单字段名原始资料未给出（TODO(待实测)），取 `auth.device_id_field`，默认 `devid`，发送时打 `assumption=device_id_field`
+- `auto` 依据**上次登录**缓存在会话文件里的 `Other.isHidUser`：`isHidUser` 来自 `conf.csp`，只有登录之后才拿得到
 - 日志里掩码显示（保留首尾各 4 字符）
 - `status --json` 默认不包含该字段，需显式 `--show-devid`
 

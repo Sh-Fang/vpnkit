@@ -10,12 +10,15 @@ host      = "vpn.example.com"
 port      = 443
 # 认证方式
 auth      = "password"        # password | cert
+insecure  = false             # true = 跳过证书校验（会打 warn）
+ca_file   = ""                # 信任的 CA PEM；网关自签证书时使用
 
 [auth]
 user           = "alice"
 mitm_field     = "mitm_result"   # 或 "mitm"
 send_rand_code = false
-send_device_id = "auto"         # auto | always | never；auto 看 Other.isHidUser
+send_device_id = "auto"         # auto | always | never；auto 看上次登录缓存的 Other.isHidUser
+device_id_field = "devid"       # 设备标识表单字段名，待实测，docs/06 §6
 
 [tunnel]
 mtu                = 1400
@@ -30,6 +33,8 @@ ctrl_conn_type     = 1           # 控制通道 conn_type，docs/03 §4.1
 token_encoding     = "ascii"     # ascii | hex，docs/03 §4.1
 data_opcode        = 0           # 数据帧发送 opcode，docs/03 §5
 rc4_key_hex        = ""          # 实验用；空 = 不支持 enc != 0，docs/05 §3.3
+data_conn_up       = 6           # 上行数据通道 conn_type，docs/03 §4.3
+data_conn_down     = 5           # 下行数据通道 conn_type，docs/03 §4.3
 
 [split]
 # 由服务端资源列表推导；也可在此手工追加
@@ -107,6 +112,10 @@ file_keep = 10                   # --verbose/--trace 时日志文件保留份数
 ```
 每个资源 → 目标地址/掩码 → 归一化为 CIDR
 ```
+
+TODO(待实测)：报文格式原始资料未给出。实现先找 `<Rc … host="a;b;c">` 元素取 `host` 属性；没有 `<Rc>` 时按行/分号逐条解析，
+打 `assumption=rclist_format value=xml-rc-host|plain-lines`。单个条目支持：CIDR、`IP/点分掩码`、单 IP、`a~b` 或 `a-b` 地址段
+（拆成最少 CIDR）、域名（去掉 `*.` 前缀）、可带 scheme 与端口；无法识别的条目跳过并 warn。`0.0.0.0/0` 一律忽略（不接管默认路由）。
 
 处理规则：
 

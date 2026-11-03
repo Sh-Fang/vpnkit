@@ -42,7 +42,8 @@ testserver/
 
 ### 2.3 隧道剧本
 
-服务端行为要能编排，覆盖所有状态机分支：
+服务端行为要能编排，覆盖所有状态机分支。下面的 YAML 只表达语义：依赖白名单没有 YAML 库，
+剧本以 Go 预置在 `testserver/scripts.go`（按"本令牌第几次建控制通道"给出步骤），`--script <名字>` 选择。
 
 ```yaml
 rclist: ["10.0.0.0/8", "corp.example.com"]   # 由 HTTP 端 /por/rclist.csp 返回
@@ -73,6 +74,12 @@ script:
 | `bad-sendip` | `SEND_IP` 中 `tapip` 为 `0.0.0.0`（测 `ErrSendIPLayout` 与原始 hex 日志） |
 | `enc-required` | `SEND_IP` 中 `enc = 1`（测 `ErrEncryptionUnsupported`） |
 | `no-valid` | 不发 10/11（测照常进入 `Running` 并告警） |
+| `drop` | 首次运行中服务端直接断开，之后正常（测网络退避与恢复） |
+| `unknown-cmd` | 运行中发未知码 99 与 4（测记录并忽略、连接保持） |
+
+假网关的数据通道会对 ICMP echo 请求作答，配合内存 TUN 即可端到端验证收发。
+
+无 root 时可用 `vpnkit up --fake-tun` 对着 testserver 跑完整 CLI：内存 TUN，路由/DNS 只打印不执行。
 
 ## 3. 单元测试要点
 
@@ -82,7 +89,7 @@ script:
 
 ```go
 func TestBuildClientMsg(t *testing.T) {
-    // conn_type < 2 → 返回错误
+    // conn_type < 2 合法（控制通道），尾部 0xFFFFFFFF
     // 尾部标志：<2 → 0xFFFFFFFF；5/6/7/8 → htonl(arg)；其他 → 0
     // 偏移 8..11 == "JJYY"
     // 偏移 48..63 == token
@@ -212,7 +219,8 @@ level=DEBUG msg="using assumption" assumption=ctrl_conn_type value=1
 level=DEBUG msg="using assumption" assumption=sendip_layout value=candidate-v1
 ```
 
-已定义的键：`handshake_template`、`clientmsg_prefix`、`ctrl_conn_type`、`token_encoding`、`sendip_layout`、`data_opcode`、`data_endian`、`rc4_key`、`valid_10_11`、`is_hid_user`。
+已定义的键：`handshake_template`、`clientmsg_prefix`、`ctrl_conn_type`、`token_encoding`、`sendip_layout`、`data_opcode`、`data_endian`、`rc4_key`、`valid_10_11`、`is_hid_user`，
+以及实现中新增的 `data_conn`、`heartbeat_format`、`kick_reason`、`rclist_format`、`device_id_field`、`login_same_twfid`。
 联调后 `grep assumption=` 即可列出本次运行依赖的全部假设及取值，据此回填 `docs/03`、`docs/04`。
 
 ### 8.3 脱敏
