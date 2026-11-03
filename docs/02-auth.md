@@ -11,7 +11,7 @@
 | 3 | `POST /por/login_psw.csp?anti_replay=1&encrypt=1` | 提交账号与密码密文 | ✅ |
 | 4 | 后续所有请求 | 带 `TWFID: <令牌>` 请求头 | ✅ |
 | 5 | `GET /por/conf.csp` | 全局配置（线路、带宽、隧道参数） | ✅ |
-| 6 | `GET /por/rclist.csp` | 资源列表 | 可选 |
+| 6 | `GET /por/rclist.csp` | 资源列表（内网网段与内网域名后缀的唯一来源，`docs/09` §4） | ✅ |
 
 ### 1.1 响应解析
 

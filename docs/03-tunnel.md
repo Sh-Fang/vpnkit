@@ -60,11 +60,12 @@ ef a3 7e 50 1c 09 6b 09 9c 5a 0d
 
 - 握手字节一个都不能改（改了就是另一个会话）
 - 客户端不需要 TLS 库，不需要 RC4 之外的任何密码原语
+- 模板里的密码套件是 `0x0039`（DHE-RSA-AES256-SHA），但这只是模板中的一个字节：服务端在 CCS 之后**不启用** TLS 记录层加密，后续 clientMsg 以明文 `JJYY` 发出。客户端**不实现**任何 TLS 记录层。（TODO(待实测)：若联调在 76/40 步失败，日志须提示"疑似服务端期待真实 TLS"）
 - 服务端会话过期会导致握手被拒，此时只能重新走认证再试
 
 ### 2.4 TODO(待实测)
 
-> 这两个模板是否被目标网关接受，**无法离线判定**。实现时把它做成可替换资源
+> 这两个模板（以及 §4.1 的 clientMsg 5 字节前缀）是否被目标网关接受，**无法离线判定**。实现时把它们做成可替换资源
 > （`internal/tunnel/templates.go`），并在失败时给出专门的错误码 `ErrHandshakeRejected`，
 > 便于联调期快速定位是不是模板失效。
 
@@ -101,20 +102,27 @@ off  len  值
 8    4    "JJYY"          魔数
 12   4    conn_type       小端 u32
 16   32   00
-48   16   session_token   16 字节会话令牌
+48   16   session_token   会话令牌，默认按 ASCII 原文填入（见下）
 64   8    00
 72   4    尾部标志        网络序（大端）u32
 ```
+
+前 5 字节 `17 03 01 00 3c` 是**原样模板**：记录头声明长度 60，但 `5 + 60 = 65 ≠ 76`，已知不自洽。
+不要"修正"成 `0x47`——那等于改线格式，联不通时也分不清原因。TODO(待实测)。
 
 尾部标志取值：
 
 | conn_type | 偏移 72 |
 |---|---|
-| < 2 | `0xFFFFFFFF`（并返回错误，见下） |
+| < 2（控制通道） | `0xFFFFFFFF` |
 | 5 / 6 / 7 / 8 | `htonl(arg)`，`arg` 由调用方给 |
 | 其他 | `0` |
 
-`conn_type < 2` 时实现应直接报错，不要发出该报文。
+`conn_type < 2` 是合法的控制通道建连，正常发出。（旧版本文档写"返回错误、不发出"，系对原实现中 `-1` 写入尾部的误读，已更正。）
+控制通道默认发 `conn_type = 1`，可通过 `tunnel.ctrl_conn_type` 配置。TODO(待实测)。
+
+会话令牌填入方式：默认把 TwfID 字符串的 ASCII 字节原样放入 16 字节字段；`tunnel.token_encoding = "hex"` 时改为 hex 解码后的字节。
+长度与 16 不符时报 `ErrTokenLength`，**不截断、不补零**。TODO(待实测)。
 
 ### 4.2 serverMsg（40 字节）
 
@@ -130,9 +138,11 @@ off 8..39  命令参数（见 docs/04）
 
 | conn_type | 用途 | 应答状态码 |
 |---|---|---|
-| < 2 | 控制通道（命令） | — 交给命令分发 |
+| < 2（默认 1） | 控制通道（命令） | — 交给命令分发 |
 | 5、8 | 下行（读流） | 2 |
 | 6、7 | 上行（写流） | 1 |
+
+数据通道建连时 serverMsg 偏移 4 的值是**应答码**，与控制通道上的命令码同位不同义（见 `GLOSSARY.md`）。
 
 控制通道与数据通道各自建连、各自走一遍上面的时序。
 
@@ -141,11 +151,17 @@ off 8..39  命令参数（见 docs/04）
 数据通道上每个包：
 
 ```
-+0   u32  opcode
-+4   u32  整包长度（含头，小端）
-+8   u32  保留
-+12  ...  裸 IPv4 包，RC4 加密
++0   u32  opcode           小端
++4   u32  整包长度（含头）  小端
++8   u32  保留             小端，发送填 0
++12  ...  裸 IPv4 包，RC4 加密（enc != 0 时）
 ```
+
+TODO(待实测)：opcode 取值与 opcode/保留字段的字节序均未验证。实现约定：
+
+- 发送 opcode 取 `tunnel.data_opcode`，默认 `0`
+- 接收不按 opcode 过滤；未见过的 opcode 在 debug 级记一次（同值只记一次）
+- 长度字段解出 `< 12` 或 `> MTU + 12` 时报错，并提示"疑似字节序错误"，附 12 字节头 hex
 
 - 12 字节头**不加密**，原样发出
 - 只有 `[12:]` 经过 RC4
@@ -174,7 +190,7 @@ tun.Write(body)
 ```go
 func BuildClientHello() []byte                                            // 返回 82 B 副本
 func BuildCCSFinished() []byte                                           // 返回 43 B 副本
-func BuildClientMsg(connType uint32, token [16]byte, arg uint32) ([]byte, error)
+func BuildClientMsg(connType uint32, token [16]byte, arg uint32) ([]byte, error) // connType<2 合法
 func ParseServerMsg(b []byte) (status int32, payload []byte, err error)
 func BuildDataFrame(opcode uint32, ipPacket []byte) []byte
 func ParseDataFrame(b []byte) (opcode uint32, ipPacket []byte, err error)

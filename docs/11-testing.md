@@ -45,13 +45,14 @@ testserver/
 服务端行为要能编排，覆盖所有状态机分支：
 
 ```yaml
+rclist: ["10.0.0.0/8", "corp.example.com"]   # 由 HTTP 端 /por/rclist.csp 返回
 script:
   - expect_bytes: 82          # ClientHello
   - send_bytes:  122
   - expect_bytes: 43
   - expect_bytes: 76
-  - send_cmd: {code: 0, tapip: "10.8.0.2", lanid: "10.8.0.1",
-               enc: 0, zip: 0, udpport: 0, routes: ["10.0.0.0/8"]}
+  - send_cmd: {code: 0, tapip: "10.8.0.2", lanip: "10.8.0.1",
+               enc: 0, zip: 0, udpport: 0}   # 布局按 docs/04 §3.0 候选表编码
   - send_cmd: {code: 10}
   - send_cmd: {code: 11}
   - loop: {heartbeat_every: 10}
@@ -69,6 +70,9 @@ script:
 | `bad-magic` | serverMsg 魔数错（测握手失败） |
 | `silent` | 握手后不发心跳（测 watchdog） |
 | `big-packets` | 持续推送大包（测 MTU 与分片） |
+| `bad-sendip` | `SEND_IP` 中 `tapip` 为 `0.0.0.0`（测 `ErrSendIPLayout` 与原始 hex 日志） |
+| `enc-required` | `SEND_IP` 中 `enc = 1`（测 `ErrEncryptionUnsupported`） |
+| `no-valid` | 不发 10/11（测照常进入 `Running` 并告警） |
 
 ## 3. 单元测试要点
 
@@ -186,3 +190,36 @@ diff /tmp/before /tmp/after          # 应无差异
 | 服务端中途关闭连接 | 进入 `Backoff`，按策略重连 |
 | 服务端回未知命令码 | 记录并忽略，连接保持 |
 | TUN 设备被外部删除 | watchdog 检出，回滚退出 6 |
+
+## 8. 联调诊断日志
+
+没有抓包可供对照，第一次真机联调基本是唯一的取证机会。日志必须足以事后还原线上字节。
+
+### 8.1 分级
+
+| 级别 | 开关 | 内容 |
+|---|---|---|
+| info | 默认 | 状态转换、握手成败、下发网段数、退避原因 |
+| debug | `--verbose` | 握手五段字节数；每条命令的命令码 + 40 字节完整 hex；clientMsg hex（会话令牌掩码）；所有数据帧 12 字节头 |
+| trace | `--trace` | debug 全部 + 每个 IP 包的头部摘要（源/目的/协议/长度）。**不输出负载**——那是用户业务流量 |
+
+### 8.2 假设点标记
+
+每个待实测假设点（`AGENTS.md` §6）在被使用时打一条结构化日志，带固定键 `assumption`：
+
+```
+level=DEBUG msg="using assumption" assumption=ctrl_conn_type value=1
+level=DEBUG msg="using assumption" assumption=sendip_layout value=candidate-v1
+```
+
+已定义的键：`handshake_template`、`clientmsg_prefix`、`ctrl_conn_type`、`token_encoding`、`sendip_layout`、`data_opcode`、`data_endian`、`rc4_key`、`valid_10_11`、`is_hid_user`。
+联调后 `grep assumption=` 即可列出本次运行依赖的全部假设及取值，据此回填 `docs/03`、`docs/04`。
+
+### 8.3 脱敏
+
+沿用 `AGENTS.md` §4：会话令牌、设备标识掩码（首尾各 4 字符），密码与 RSA 明文永不输出。hex dump 中令牌所在字节同样掩码。
+
+### 8.4 输出位置
+
+默认写 stderr。`--verbose` 或 `--trace` 时同时写 `~/.config/vpnkit/logs/vpnkit-<时间戳>.log`（权限 `0600`），保留最近 `log.file_keep`（默认 10）份。
+

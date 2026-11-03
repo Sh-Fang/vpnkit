@@ -15,6 +15,7 @@ auth      = "password"        # password | cert
 user           = "alice"
 mitm_field     = "mitm_result"   # 或 "mitm"
 send_rand_code = false
+send_device_id = "auto"         # auto | always | never；auto 看 Other.isHidUser
 
 [tunnel]
 mtu                = 1400
@@ -23,6 +24,12 @@ heartbeat_interval = "10s"
 heartbeat_timeout  = "30s"
 connect_timeout    = "10s"
 handshake_timeout  = "15s"
+valid_wait         = "10s"       # 进入 Running 后等待 10/11 的告警阈值
+# 以下为待实测假设点（AGENTS.md §6），默认值来自文档推断
+ctrl_conn_type     = 1           # 控制通道 conn_type，docs/03 §4.1
+token_encoding     = "ascii"     # ascii | hex，docs/03 §4.1
+data_opcode        = 0           # 数据帧发送 opcode，docs/03 §5
+rc4_key_hex        = ""          # 实验用；空 = 不支持 enc != 0，docs/05 §3.3
 
 [split]
 # 由服务端资源列表推导；也可在此手工追加
@@ -35,8 +42,9 @@ suffixes = ["corp.example.com"]
 servers  = ["10.0.0.53"]
 
 [log]
-level  = "info"                  # debug | info | warn | error
+level  = "info"                  # trace | debug | info | warn | error
 format = "text"                  # text | json
+file_keep = 10                   # --verbose/--trace 时日志文件保留份数，docs/11 §8
 ```
 
 优先级：命令行参数 > 环境变量（`VPNKIT_*`）> 配置文件 > 内置默认值。
@@ -70,7 +78,7 @@ format = "text"                  # text | json
   <TcpApplication userMode="1" compress="0" maxthread="50" maxsession="2"/>
   <L3VPN  iptunDns="0.0.0.0" iptunDnsBak="0.0.0.0"/>
   <Security interval="0" ignoreResult="0"/>
-  <Other  login_name="lpt" sddn_enable="0" enableAutoRelogin="0"/>
+  <Other  login_name="lpt" sddn_enable="0" enableAutoRelogin="0" isHidUser="0"/>
 </Conf>
 ```
 
@@ -84,7 +92,7 @@ format = "text"                  # text | json
 | `TcpApplication.compress` | 是否压缩 | 已知恒为 0，见 `docs/04` §3.1 |
 | `TcpApplication.maxsession` | 单用户最大并发会话数 | 决定可同时建几条数据通道 |
 | `L3VPN.iptunDns` | 隧道内 DNS | `--dns-servers` 未指定时的默认值 |
-| `Other.isHidUser` | 当前账号是否启用了设备绑定 | 为 1 时才需要上报设备标识 |
+| `Other.isHidUser` | 当前账号是否启用了设备绑定 | `send_device_id=auto` 时：为 1 上报设备标识；缺失按 0 处理并打 info 日志 |
 
 解析要求：
 
@@ -94,7 +102,7 @@ format = "text"                  # text | json
 
 ## 4. 资源列表
 
-`GET /por/rclist.csp` 返回可访问的内网资源。本项目只关心其中的**网段**部分：
+`GET /por/rclist.csp` 返回可访问的内网资源，是内网网段与内网域名后缀的**唯一**服务端来源（`split.extra_routes` 仅作补充）。本项目只关心其中的网段与域名部分：
 
 ```
 每个资源 → 目标地址/掩码 → 归一化为 CIDR

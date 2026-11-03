@@ -29,7 +29,7 @@ flowchart LR
   SES -->|1. 读令牌| AUTH[auth]
   SES -->|2. 控制通道握手| TUN[tunnel]
   TUN -->|3. 40B 命令| CMD[command]
-  CMD -->|4. 下发网段| RT[route]
+  AUTH -->|4. 资源列表→内网网段| RT[route]
   CMD -->|5. 下发虚拟IP| TUN
   RT -->|6. 加路由/DNS| OS[(系统网络栈)]
   TUN <-->|12B头+IPv4| DEV[platform/tun]
@@ -41,7 +41,7 @@ flowchart LR
 1. 读本地令牌，必要时刷新；无令牌 → 退出码 3
 2. 向网关发起控制通道：握手 → 收到服务端确认
 3. 发「请求分配地址」命令，收到 40 字节应答
-4. 从应答解析出虚拟 IP、内网网段、`enc`/`zip`/`udpport`
+4. 从应答解析出虚拟 IP、`enc`/`zip`/`udpport`；内网网段来自认证阶段取得的资源列表（`docs/09` §4）
 5. 创建 TUN 设备，配置虚拟 IP 与 MTU
 6. 只针对内网网段加路由；配置分区 DNS
 7. 启动收发 goroutine，进入 `RUNNING`
@@ -77,7 +77,7 @@ stateDiagram-v2
   Connecting --> Idle: 握手失败
   WaitAddress --> Configuring: 收到分配地址
   WaitAddress --> Backoff: 服务端繁忙类应答
-  Configuring --> Running: 路由/DNS 就绪
+  Configuring --> Running: 路由/DNS 就绪（10/11 不作为前置条件，见 docs/04 §7）
   Configuring --> Idle: 配置失败（回滚）
   Running --> Backoff: 连接断开
   Running --> Stopped: 被踢 / 服务端关闭

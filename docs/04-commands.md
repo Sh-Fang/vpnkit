@@ -6,7 +6,7 @@
 
 | code | 名称 | 客户端应做什么 |
 |---:|---|---|
-| **0** | `SEND_IP` | **分配地址**：解析虚拟 IP、内网网段、`enc`/`zip`/`udpport`，进入配置阶段 |
+| **0** | `SEND_IP` | **分配地址**：解析虚拟 IP、`enc`/`zip`/`udpport`，进入配置阶段 |
 | 3 | `SERVER_RESET` | 重置会话：立即重连（不退避） |
 | 4 | `RECOVERED` | 会话已恢复：仅记录，继续运行 |
 | 5 | `RECONNECTLATER_IPISBUSY` | 虚拟 IP 被占：退避后重连 |
@@ -14,8 +14,8 @@
 | 7 | `RECONNECTLATER_SYSTEMISBUSY` | 服务端繁忙：退避后重连 |
 | 8 | `SHUTDOWN` | 服务端强制断开：转 `Stopped`，退回退出码 7 |
 | 9 | `RECONNECTLATER_CONFLICT` | 地址冲突：退避后重连（退避时间应更长） |
-| 10 | `IPVALID` | 虚拟 IP 校验通过：可进入 `Running` |
-| 11 | `GROUPIDVALID` | 组 ID 校验通过：可进入 `Running` |
+| 10 | `IPVALID` | 虚拟 IP 校验通过：仅记录（见 §7） |
+| 11 | `GROUPIDVALID` | 组 ID 校验通过：仅记录（见 §7） |
 | 14 | `IPKICK` | **被踢下线**：转 `Stopped`，打印原因 |
 | 15 | `HEARTBEAT` | 心跳：无需应答，刷新对端活跃时间 |
 
@@ -43,6 +43,25 @@ code `1`、`2`、`12`、`13` 未使用，收到时按未知命令处理（记录
 | `zip` | int | 是否启用压缩 | 当前实现恒为 0，见 §3.1 |
 | `udpport` | uint | UDP 承载端口 | 0 表示不支持 UDP 承载 |
 
+### 3.0 负载布局（TODO(待实测)）
+
+原始资料未给出这 32 字节的布局。实现必须**表驱动**（字段名、偏移、长度、编码一张表），便于联调后只改表。候选布局：
+
+| 偏移 | 长度 | 字段 | 编码 |
+|---|---|---|---|
+| 8 | 4 | `tapip` | IPv4，网络序 |
+| 12 | 4 | `lanip` | IPv4，网络序 |
+| 16 | 4 | `enc` | u32 小端 |
+| 20 | 4 | `zip` | u32 小端 |
+| 24 | 4 | `udpport` | u32 小端 |
+| 28 | 12 | 保留 | 忽略 |
+
+排障要求：
+
+- 每次收到 `SEND_IP`，在 debug 级完整 hex dump 40 字节（不含密钥类内容）
+- 解析后做合理性检查：`tapip` 不得为 `0.0.0.0` / 广播 / 组播，`enc`、`zip` ∈ {0,1}，`udpport` ≤ 65535
+- 检查失败 → `ErrSendIPLayout`，error 级日志附原始 40 字节 hex，回滚，退出码 4
+
 ### 3.1 关于 `zip`
 
 当前已知实现里 `zip` 恒为 0，且数据帧的变换是**等长**的（RC4），因此**不存在压缩分支**。
@@ -53,7 +72,7 @@ code `1`、`2`、`12`、`13` 未使用，收到时按未知命令处理（记录
 
 ### 3.2 关于内网网段
 
-内网网段来自 `conf.csp` 的资源列表（`docs/09` §3），不在 `SEND_IP` 消息里。
+内网网段来自 `rclist.csp` 的资源列表（`docs/09` §4），不在 `SEND_IP` 消息里；`conf.csp` 只提供隧道参数。
 两者都要解析：`SEND_IP` 给本机地址，资源列表给路由目标。
 
 ## 4. 心跳
@@ -111,19 +130,24 @@ heartbeat_timeout  = "30s"    # 超过此时间未收到任何服务端消息则
 stateDiagram-v2
   WaitAddress --> Backoff: 5/6/7/9
   WaitAddress --> Configuring: 0 SEND_IP
-  Configuring --> Running: 10 IPVALID + 11 GROUPIDVALID
+  Configuring --> Running: 路由/DNS 就绪
   Running --> Running: 15 HEARTBEAT / 4 RECOVERED
   Running --> Connecting: 3 SERVER_RESET
   Running --> Backoff: 连接断开
   Running --> Stopped: 8 SHUTDOWN / 14 IPKICK
 ```
 
+10 `IPVALID` / 11 `GROUPIDVALID` 的到达顺序与时机未验证（TODO(待实测)），**不作为进入 `Running` 的前置条件**——猜错会卡死在 `Configuring`。
+它们只记录日志；进入 `Running` 后 `tunnel.valid_wait`（默认 `10s`）内仍未收到，打 warn，不断开。
+
 ## 8. 测试用例
 
 | 用例 | 期望 |
 |---|---|
-| 收到 0，字段齐全 | 进入 `Configuring`，解析出正确 IP 与网段 |
-| 收到 0，`tapip` 非法 | 回滚，退出码 6 |
+| 收到 0，字段齐全 | 进入 `Configuring`，解析出正确虚拟 IP |
+| 收到 0，`tapip` 非法 | `ErrSendIPLayout`，日志含原始 hex，回滚，退出码 4 |
+| 收到 0，`enc != 0` | `ErrEncryptionUnsupported`，退出码 4（`docs/05` §3.3） |
+| 未收到 10/11 | 照常进入 `Running`，`valid_wait` 后打 warn |
 | 收到 5 | 进入 `Backoff`，5 秒后重连 |
 | 收到 14 | 进入 `Stopped`，退出码 7，不重连 |
 | 收到未知码 99 | 记录日志，连接保持，状态不变 |
