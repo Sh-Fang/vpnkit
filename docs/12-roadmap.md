@@ -62,7 +62,7 @@
 
 ---
 
-## P3 · 分流（3–4 天） 🟡 待 root 验证
+## P3 · 分流（3–4 天） 🟡 Windows 已验证，Linux / macOS 待验证
 
 **范围**：`internal/route`、`internal/platform/tun`。
 
@@ -74,20 +74,20 @@
 4. `--dry-run`
 5. 收发 goroutine（12 字节头 + 裸 IPv4）
 
-**DoD**
+**DoD**（Windows 已用 testserver + 真实 Wintun 验证，网段用 `198.18.0.0/24`；Linux / macOS 未验证）
 
-- [ ] `up` 后默认路由**逐字节未变**
-- [ ] 只有剧本下发的网段指向 TUN
-- [ ] `ping` 内网通、`ping 8.8.8.8` 走物理网卡
-- [ ] `down` 后路由表与 `up` 前无差异
-- [ ] `kill -9` 后再 `up` 能自动清理残留
-- [ ] 三平台 `doctor` 通过
+- [x] `up` 后默认路由**逐字节未变**
+- [x] 只有剧本下发的网段指向 TUN
+- [x] `ping` 内网通、`ping 8.8.8.8` 走物理网卡
+- [x] `down` 后路由表与 `up` 前无差异（含服务端地址已有 /32 路由的情况）
+- [x] `kill -9` 后再 `up` 能自动清理残留
+- [ ] 三平台 `doctor` 通过（Windows 已通过）
 
 **风险**：路由失败会破坏网络 → 必须实现回滚，且回滚本身要能失败重试。
 
 ---
 
-## P4 · DNS 分区（2 天） 🟡 待 root 验证
+## P4 · DNS 分区（2 天） 🟡 Windows 已验证，Linux / macOS 待验证
 
 **范围**：`internal/route/dns_*.go`。
 
@@ -95,10 +95,11 @@
 
 **DoD**
 
-- [ ] 内网域名走隧道 DNS，公网域名走本地
-- [ ] `down` 后 DNS 完全恢复
+- [x] 内网域名走隧道 DNS，公网域名走本地（Windows；需处理空的组策略 NRPT 键，见 `docs/07` §3.3）
+- [x] `down` 后 DNS 完全恢复（Windows）
 - [ ] systemd-resolved 缺失时有明确提示，不改 `/etc/resolv.conf`
-- [ ] Windows NRPT 规则带 `Comment=vpnkit`，可精确清理
+- [x] Windows NRPT 规则带 `Comment=vpnkit`，可精确清理
+- [x] Windows 开着 Clash 系统代理时，内网走 VPN、国内直连、国外走代理三路同时可用（系统代理例外，`docs/07` §3.3）
 
 ---
 
@@ -117,7 +118,7 @@
 
 - [ ] 同样内容下载，UDP 承载吞吐高于 TCP 承载（若网关支持）
 - [ ] 8 小时稳定性：RSS 波动 < 20%
-- [ ] 网络切换后 30 秒内自愈
+- [ ] 网络切换后 30 秒内自愈（本机 testserver 无法模拟：与客户端同机，流量不经过网卡；服务端断开后的退避重连已验证）
 
 ---
 

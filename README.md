@@ -93,8 +93,8 @@ vpnkit/
 | P0 | 文档与协议规格 | ✅ 完成（本套文档） |
 | P1 | 认证链路 | ✅ 已实现，testserver 验收通过 |
 | P2 | 隧道建立（控制通道） | ✅ 已实现，testserver 验收通过 |
-| P3 | 路由分流 + 内网可达 | 🟡 已实现；命令生成与 dry-run 已验证，真实 TUN/路由待 root 环境验证 |
-| P4 | DNS 分区 | 🟡 已实现；同上，待 root 环境验证 |
+| P3 | 路由分流 + 内网可达 | 🟡 已实现；Windows 已用 testserver + 真实 TUN 验证，Linux / macOS 待验证 |
+| P4 | DNS 分区 | 🟡 已实现；Windows 已验证（含 Clash 系统代理共存），Linux / macOS 待验证 |
 | P5 | UDP 承载与性能调优 | 待实现（`--transport udp` 目前回退 TCP 并告警） |
 
 真机联调前请先看 `docs/12` 末尾的联调检查表：所有待实测假设点都会以 `assumption=<key>` 记入日志。
