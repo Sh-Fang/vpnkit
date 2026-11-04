@@ -21,9 +21,13 @@ type AuthConfig struct {
 	NoPswConfig bool
 	// OmitTwfID 让 login_auth.csp 不返回 TwfID，测试格式错误分支。
 	OmitTwfID bool
-	Captcha   bool
-	ConfXML   string
-	RCList    string
+	// KeepTwfID 模拟 M7.6.8R2：登录成功只回 ErrorCode=1，不发新令牌，沿用 login_auth 的 TwfID。
+	KeepTwfID bool
+	// NextAuth 非空时登录成功响应带 <NextAuth>，测试二次认证分支。
+	NextAuth string
+	Captcha  bool
+	ConfXML  string
+	RCList   string
 }
 
 type pending struct {
@@ -151,7 +155,7 @@ func (s *AuthServer) loginAuth(w http.ResponseWriter, r *http.Request) {
 		twfXML = ""
 	}
 	w.Header().Set("Content-Type", "text/xml")
-	fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><ErrorCode>1</ErrorCode><Message>auth success</Message>%s<RSA_ENCRYPT_KEY>%X</RSA_ENCRYPT_KEY><RSA_ENCRYPT_EXP>10001</RSA_ENCRYPT_EXP><CSRF_RAND_CODE>%s</CSRF_RAND_CODE><RndImg>%s</RndImg></Auth>`,
+	fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><ErrorCode>1</ErrorCode><Message>auth success</Message>%s<RSA_ENCRYPT_KEY>%X</RSA_ENCRYPT_KEY><RSA_ENCRYPT_EXP>65537</RSA_ENCRYPT_EXP><CSRF_RAND_CODE>%s</CSRF_RAND_CODE><RndImg>%s</RndImg></Auth>`,
 		twfXML, s.keyA.N, csrf, rnd)
 }
 
@@ -217,6 +221,13 @@ func (s *AuthServer) loginPsw(w http.ResponseWriter, r *http.Request) {
 	}
 	if !known || string(pt) != want+"_"+p.csrf {
 		fail("用户名或密码错误")
+		return
+	}
+	if s.cfg.KeepTwfID || s.cfg.NextAuth != "" {
+		s.mu.Lock()
+		s.sessions[twf] = user
+		s.mu.Unlock()
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><ErrorCode>1</ErrorCode><Message>Auth is success</Message><NextAuth>%s</NextAuth></Auth>`, s.cfg.NextAuth)
 		return
 	}
 	newID := randHex(8)

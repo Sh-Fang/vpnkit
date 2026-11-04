@@ -23,9 +23,11 @@ type Server struct {
 	Port int    `toml:"port"`
 	Auth string `toml:"auth"`
 	// 网关多为自签证书。默认仍校验证书；用 ca_file 信任指定 CA，
-	// 或显式 insecure=true 跳过（会打 warn）。
-	Insecure bool   `toml:"insecure"`
-	CAFile   string `toml:"ca_file"`
+	// 或显式 insecure=true 跳过（会打 warn）。深信服出厂证书自签且不带 SAN，ca_file 也校验不过，
+	// 此时用 cert_sha256 只认这一张证书。
+	Insecure   bool   `toml:"insecure"`
+	CAFile     string `toml:"ca_file"`
+	CertSHA256 string `toml:"cert_sha256"`
 }
 
 type Auth struct {

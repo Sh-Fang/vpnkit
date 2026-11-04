@@ -71,3 +71,28 @@ func TestMD5Upper(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestParseRSAExp(t *testing.T) {
+	for in, want := range map[string]int{"65537": 65537, " 65537 ": 65537, "10001": 65537, "0x10001": 65537, "3": 3, "1001b": 65563} {
+		if got, ok := ParseRSAExp(in); !ok || got != want {
+			t.Errorf("%q → %d,%v want %d", in, got, ok, want)
+		}
+	}
+	for _, in := range []string{"", "1", "65536", "zz", "99999999999"} {
+		if _, ok := ParseRSAExp(in); ok {
+			t.Errorf("%q accepted", in)
+		}
+	}
+}
+
+func TestEncryptPasswordDecimalExp(t *testing.T) {
+	priv, _ := rsa.GenerateKey(rand.Reader, 1024)
+	got, err := EncryptPassword(rand.Reader, "s3cret", "1413239678", fmt.Sprintf("%X", priv.N), "65537")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct, _ := hex.DecodeString(got)
+	if pt, err := rsa.DecryptPKCS1v15(nil, priv, ct); err != nil || string(pt) != "s3cret_1413239678" {
+		t.Fatalf("%q %v", pt, err)
+	}
+}

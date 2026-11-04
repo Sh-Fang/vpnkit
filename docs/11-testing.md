@@ -219,7 +219,7 @@ level=DEBUG msg="using assumption" assumption=ctrl_conn_type value=1
 level=DEBUG msg="using assumption" assumption=sendip_layout value=candidate-v1
 ```
 
-已定义的键：`handshake_template`、`clientmsg_prefix`、`ctrl_conn_type`、`token_encoding`、`sendip_layout`、`data_opcode`、`data_endian`、`rc4_key`、`valid_10_11`、`is_hid_user`，
+已定义的键：`handshake_template`、`rsa_exp`、`login_next_auth`、`clientmsg_prefix`、`ctrl_conn_type`、`token_encoding`、`sendip_layout`、`data_opcode`、`data_endian`、`rc4_key`、`valid_10_11`、`is_hid_user`，
 以及实现中新增的 `data_conn`、`heartbeat_format`、`kick_reason`、`rclist_format`、`device_id_field`、`login_same_twfid`。
 联调后 `grep assumption=` 即可列出本次运行依赖的全部假设及取值，据此回填 `docs/03`、`docs/04`。
 

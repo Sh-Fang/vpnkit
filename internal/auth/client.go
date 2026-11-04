@@ -4,8 +4,10 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +30,8 @@ var (
 	ErrLoginRejected   = errors.New("网关拒绝登录")
 	ErrSessionExpired  = errors.New("会话已失效，请重新 vpnkit login")
 	ErrCaptchaRequired = errors.New("网关要求图形验证码")
+	ErrCertMismatch    = errors.New("网关证书指纹与 cert_sha256 不符")
+	ErrSecondFactor    = errors.New("网关要求二次认证（短信、令牌等），当前版本不支持")
 )
 
 // RejectError 携带网关返回的可读消息，透传给用户便于自助排查（docs/02 §4）。
@@ -54,6 +58,7 @@ type Options struct {
 	Port          int
 	Insecure      bool
 	CAFile        string
+	CertSHA256    string // 十六进制，大小写与冒号分隔均可
 	Timeout       time.Duration
 	MitmField     string
 	SendRandCode  bool
@@ -101,7 +106,24 @@ func New(o Options) (*Client, error) {
 		}
 		tc.RootCAs = pool
 	}
-	if o.Insecure {
+	if o.CertSHA256 != "" {
+		want, err := parseFingerprint(o.CertSHA256)
+		if err != nil {
+			return nil, err
+		}
+		// 出厂证书的名字与网关域名对不上，标准校验必然失败；改为只比对叶子证书指纹。
+		tc.InsecureSkipVerify = true
+		tc.VerifyConnection = func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return fmt.Errorf("%w: 网关没有出示证书", ErrCertMismatch)
+			}
+			got := sha256.Sum256(cs.PeerCertificates[0].Raw)
+			if got != want {
+				return fmt.Errorf("%w: 实际为 %s", ErrCertMismatch, strings.ToUpper(hex.EncodeToString(got[:])))
+			}
+			return nil
+		}
+	} else if o.Insecure {
 		c.log.Warn("已关闭网关证书校验（server.insecure=true），仅在确认网络可信时使用")
 		tc.InsecureSkipVerify = true
 	}
@@ -112,6 +134,16 @@ func New(o Options) (*Client, error) {
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	return c, nil
+}
+
+func parseFingerprint(s string) ([32]byte, error) {
+	var fp [32]byte
+	b, err := hex.DecodeString(strings.ReplaceAll(strings.TrimSpace(s), ":", ""))
+	if err != nil || len(b) != len(fp) {
+		return fp, fmt.Errorf("%w: cert_sha256 应为 64 位十六进制（可带冒号）", vpnerr.ErrUsage)
+	}
+	copy(fp[:], b)
+	return fp, nil
 }
 
 // LoginRequest 是一次登录的输入。Password 只在内存中停留，不落盘、不进日志。
@@ -157,8 +189,9 @@ func (c *Client) Login(ctx context.Context, req LoginRequest) (string, error) {
 		return "", fmt.Errorf("%w: %w: 缺少 RSA_ENCRYPT_KEY 或 CSRF_RAND_CODE", vpnerr.ErrAuth, ErrBadResponse)
 	}
 	if exp == "" {
-		exp = "10001"
+		exp = "65537"
 	}
+	logx.Assumption(c.log, "rsa_exp", exp)
 	if f["RndImg"] == "1" && req.Captcha == "" {
 		return "", fmt.Errorf("%w: %w（当前版本不支持获取验证码图片）", vpnerr.ErrAuth, ErrCaptchaRequired)
 	}
@@ -202,7 +235,7 @@ func (c *Client) Login(ctx context.Context, req LoginRequest) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("%w: %w: login_psw.csp HTTP %d", vpnerr.ErrAuth, ErrBadResponse, resp.StatusCode)
 	}
-	rf := extractFields(rb, "TwfID", "Result", "ErrorCode", "Message", "Note")
+	rf := extractFields(rb, "TwfID", "Result", "ErrorCode", "Message", "Note", "NextAuth", "NextService")
 	newID := rf["TwfID"]
 	for _, ck := range resp.Cookies() {
 		if strings.EqualFold(ck.Name, "TWFID") && ck.Value != "" {
@@ -211,14 +244,19 @@ func (c *Client) Login(ctx context.Context, req LoginRequest) (string, error) {
 	}
 	msg := firstNonEmpty(rf["Message"], rf["Note"])
 	code := firstNonEmpty(rf["ErrorCode"], rf["Result"])
+	ok := rf["Result"] == "1" || rf["ErrorCode"] == "1"
+	logx.Assumption(c.log, "login_next_auth", rf["NextAuth"], "next_service", rf["NextService"], "twfid_in_response", newID != "")
+	if ok && rf["NextAuth"] != "" && rf["NextAuth"] != "-1" {
+		return "", fmt.Errorf("%w: %w（NextAuth=%s NextService=%s）", vpnerr.ErrAuth, ErrSecondFactor, rf["NextAuth"], rf["NextService"])
+	}
 	switch {
 	case newID != "" && newID != initial:
 		return newID, nil
-	case newID != "" && newID == initial && (rf["Result"] == "1" || rf["ErrorCode"] == "1"):
-		// docs/02 §4 要求新旧令牌不同；部分网关登录后沿用原令牌但给出明确成功码，此时放行并留痕。
+	case ok:
+		// docs/02 §4 要求新旧令牌不同；实测 M7.6.8R2 成功后响应里不带 TwfID，沿用 login_auth 的令牌。
 		logx.Assumption(c.log, "login_same_twfid", true)
 		c.log.Warn("登录响应沿用了原令牌，依据成功码判定为成功", "result", rf["Result"], "error_code", rf["ErrorCode"])
-		return newID, nil
+		return initial, nil
 	default:
 		return "", &RejectError{Code: code, Message: msg}
 	}

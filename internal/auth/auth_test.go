@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net"
 	"net/http/httptest"
@@ -252,5 +254,63 @@ func TestSessionStore(t *testing.T) {
 	}
 	if err := DeleteSession(d, "vpn.example.com"); err != nil {
 		t.Fatal("delete should be idempotent")
+	}
+}
+
+func TestCertSHA256Pinning(t *testing.T) {
+	as, err := testserver.NewAuthServer(testserver.AuthConfig{Users: map[string]string{"alice": "s3cret"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewTLSServer(as.Handler())
+	t.Cleanup(srv.Close)
+	host, portS, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	port, _ := strconv.Atoi(portS)
+	sum := sha256.Sum256(srv.Certificate().Raw)
+	fp := hex.EncodeToString(sum[:])
+	login := func(pin string) error {
+		c, err := New(Options{Server: host, Port: port, CertSHA256: pin, Timeout: 5 * time.Second})
+		if err != nil {
+			return err
+		}
+		_, err = c.Login(context.Background(), LoginRequest{User: "alice", Password: "s3cret"})
+		return err
+	}
+	colon := strings.ToUpper(fp[:2])
+	for i := 2; i < len(fp); i += 2 {
+		colon += ":" + strings.ToUpper(fp[i:i+2])
+	}
+	for _, pin := range []string{fp, colon} {
+		if err := login(pin); err != nil {
+			t.Fatalf("pin %s: %v", pin, err)
+		}
+	}
+	if err := login(strings.Repeat("00", 32)); !errors.Is(err, ErrCertMismatch) {
+		t.Fatalf("wrong pin: %v", err)
+	}
+	if err := login("abcd"); !errors.Is(err, vpnerr.ErrUsage) {
+		t.Fatalf("bad pin: %v", err)
+	}
+}
+
+func TestLoginKeepsTwfIDOnSuccessCode(t *testing.T) {
+	as, c := newGateway(t, testserver.AuthConfig{KeepTwfID: true})
+	tok, err := c.Login(context.Background(), LoginRequest{User: "alice", Password: "s3cret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !as.ValidToken(tok) {
+		t.Fatalf("token %q not registered", tok)
+	}
+	if _, err := c.Login(context.Background(), LoginRequest{User: "alice", Password: "wrong"}); !errors.Is(err, ErrLoginRejected) {
+		t.Fatalf("wrong password: %v", err)
+	}
+}
+
+func TestLoginSecondFactorRequired(t *testing.T) {
+	_, c := newGateway(t, testserver.AuthConfig{NextAuth: "2"})
+	_, err := c.Login(context.Background(), LoginRequest{User: "alice", Password: "s3cret"})
+	if !errors.Is(err, ErrSecondFactor) || !errors.Is(err, vpnerr.ErrAuth) {
+		t.Fatalf("got %v", err)
 	}
 }

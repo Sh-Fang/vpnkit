@@ -21,7 +21,7 @@
 |---|---|
 | `TwfID` | 会话令牌，后续请求头 `TWFID` |
 | `RSA_ENCRYPT_KEY` | 公钥模数 n（十六进制） |
-| `RSA_ENCRYPT_EXP` | 公钥指数 e（十六进制，通常 `10001`） |
+| `RSA_ENCRYPT_EXP` | 公钥指数 e。实测 M7.6.8R2 写十进制 `65537`；也可能写十六进制 `10001`，两种都要认（见 §2） |
 | `CSRF_RAND_CODE` | 密码拼接用随机码 |
 | `RndImg` / `StartAuth` | 图形验证码是否启用 |
 
@@ -48,7 +48,7 @@ Go 实现要点：
 
 ```go
 n := new(big.Int); n.SetString(rsaKeyHex, 16)
-e := int(new(big.Int).SetString(rsaExpHex, 16).Int64())
+e, _ := wire.ParseRSAExp(rsaExp) // 十进制 "65537"；"10001"、带 0x 或含 a–f 时按十六进制
 pub := &rsa.PublicKey{N: n, E: e}
 ct, err := rsa.EncryptPKCS1v15(rand.Reader, pub, []byte(plaintext))
 ```
@@ -82,13 +82,20 @@ send_rand_code = false       # 未启用图形验证码时
 1. HTTP 200
 2. 响应体（或 `Set-Cookie: TWFID`）包含新的令牌，且与请求前不同
 
-TODO(待实测)：若响应沿用原令牌但带明确成功码（`Result=1` 或 `ErrorCode=1`），实现放行并打 warn 与
-`assumption=login_same_twfid`，避免把成功误判为失败。
+实测 M7.6.8R2：成功时响应只有 `<ErrorCode>1</ErrorCode><Message>Auth is success</Message>`，不带 `TwfID`、
+也不发 `Set-Cookie`，令牌沿用第 1 步拿到的那个。因此带明确成功码（`Result=1` 或 `ErrorCode=1`）时放行，
+沿用原令牌，打 warn 与 `assumption=login_same_twfid`。
+
+成功响应若带 `NextAuth` 且不是 `-1`，说明网关还要二次认证（短信、令牌等），当前版本报 `ErrSecondFactor`，
+退出码 3。`NextAuth`、`NextService` 的值记入 `assumption=login_next_auth`。
 
 图形验证码：`RndImg=1` 时当前版本直接报错（退出码 3），暂不支持拉取验证码图片；`--captcha` 仅用于已知验证码的场景。
 
 证书：网关多为自签证书。默认**校验**证书；用 `server.ca_file`（或 `--ca-file`）信任指定 CA，
 确认网络可信时才用 `server.insecure = true`（或 `--insecure`），后者会打 warn。
+深信服出厂证书自签且只有 `CN=sslvpn`、不带 SAN，与网关域名对不上，`ca_file` 也校验不过；此时用
+`server.cert_sha256`（或 `--cert-sha256`）只信任这一张叶子证书，指纹不符报 `ErrCertMismatch` 并给出实际指纹。
+指纹可用 `openssl s_client -connect <host>:443 | openssl x509 -noout -fingerprint -sha256` 获取。
 
 失败时通常返回一个错误码字段与可读消息。要求：
 

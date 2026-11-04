@@ -12,6 +12,7 @@ port      = 443
 auth      = "password"        # password | cert
 insecure  = false             # true = 跳过证书校验（会打 warn）
 ca_file   = ""                # 信任的 CA PEM；网关自签证书时使用
+cert_sha256 = ""              # 只信任这一张证书的 SHA-256 指纹；证书名字与域名对不上时使用（docs/02 §4）
 
 [auth]
 user           = "alice"

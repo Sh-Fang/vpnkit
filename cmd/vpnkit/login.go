@@ -27,6 +27,7 @@ type serverFlags struct {
 	port     int
 	insecure bool
 	caFile   string
+	certSHA  string
 }
 
 func (s *serverFlags) register(fs *flag.FlagSet) {
@@ -34,6 +35,7 @@ func (s *serverFlags) register(fs *flag.FlagSet) {
 	fs.IntVar(&s.port, "port", 0, "网关 HTTPS 端口（覆盖 server.port）")
 	fs.BoolVar(&s.insecure, "insecure", false, "跳过网关证书校验（覆盖 server.insecure）")
 	fs.StringVar(&s.caFile, "ca-file", "", "信任的 CA 证书 PEM（覆盖 server.ca_file）")
+	fs.StringVar(&s.certSHA, "cert-sha256", "", "只信任这一张网关证书的 SHA-256 指纹（覆盖 server.cert_sha256）")
 }
 
 func (s *serverFlags) apply(a *app) {
@@ -60,6 +62,9 @@ func (s *serverFlags) apply(a *app) {
 	if s.caFile != "" {
 		a.cfg.Server.CAFile = s.caFile
 	}
+	if s.certSHA != "" {
+		a.cfg.Server.CertSHA256 = s.certSHA
+	}
 }
 
 func (a *app) authClient() (*auth.Client, error) {
@@ -68,6 +73,7 @@ func (a *app) authClient() (*auth.Client, error) {
 		Port:          a.cfg.Server.Port,
 		Insecure:      a.cfg.Server.Insecure,
 		CAFile:        a.cfg.Server.CAFile,
+		CertSHA256:    a.cfg.Server.CertSHA256,
 		Timeout:       a.g.timeout,
 		MitmField:     a.cfg.Auth.MitmField,
 		SendRandCode:  a.cfg.Auth.SendRandCode,
