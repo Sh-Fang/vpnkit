@@ -110,6 +110,7 @@ type fakeRunner struct {
 	query    map[string]string // 命令前缀 → 输出
 	files    map[string]string
 	noResolv bool
+	linkGone bool
 }
 
 func newFake() *fakeRunner {
@@ -166,6 +167,8 @@ func (f *fakeRunner) ReadFile(p string) ([]byte, error) {
 }
 
 func (f *fakeRunner) LookPath(string) bool { return !f.noResolv }
+
+func (f *fakeRunner) LinkExists(string) bool { return !f.linkGone }
 
 func (f *fakeRunner) all() string {
 	f.mu.Lock()
@@ -361,6 +364,25 @@ func TestRecover(t *testing.T) {
 	saveState(dir, &State{PID: 4242, GOOS: "linux"})
 	if _, err := Recover(context.Background(), dir, f, nil, func(int) bool { return true }); !errors.Is(err, ErrAlreadyRunning) {
 		t.Fatalf("alive pid: %v", err)
+	}
+}
+
+// Windows 强制结束 up 后 wintun 网卡随之消失，netsh 删路由报本地化的「找不到元素」。
+func TestRecoverTunGoneWindows(t *testing.T) {
+	dir := t.TempDir()
+	saveState(dir, &State{PID: 999999, GOOS: "windows", Tun: "vpnkit", RoutesAdded: []string{"198.18.0.0/24"}, NRPTAdded: []string{".corp.example.com"}})
+	f := newFake()
+	f.linkGone = true
+	f.failOn["netsh interface ipv4 delete route"] = "找不到元素。"
+	ok, err := Recover(context.Background(), dir, f, nil, func(int) bool { return false })
+	if !ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	if strings.Contains(f.all(), "delete route") || !strings.Contains(f.all(), "Remove-DnsClientNrptRule") {
+		t.Fatal(f.all())
+	}
+	if st, _ := LoadState(dir); st != nil {
+		t.Fatal("state must be removed")
 	}
 }
 

@@ -241,6 +241,12 @@ func Cleanup(ctx context.Context, r Runner, st *State, log *slog.Logger) []error
 	}
 	st.DNSFiles = keepFiles
 	// 网段路由（逆序）
+	// TUN 设备已随进程消失时，挂在它上面的路由已被系统一并删除；
+	// 不能靠 alreadyGone 识别，因为中文 Windows 的 netsh 报错是本地化文字。
+	if st.Tun != "" && len(st.RoutesAdded) > 0 && !r.LinkExists(st.Tun) {
+		log.Info("TUN 设备已不存在，其上的路由随之移除", "dev", st.Tun, "routes", len(st.RoutesAdded))
+		st.RoutesAdded = nil
+	}
 	var keepRoutes []string
 	for i := len(st.RoutesAdded) - 1; i >= 0; i-- {
 		pfx, err := netip.ParsePrefix(st.RoutesAdded[i])

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +24,7 @@ type Runner interface {
 	RemoveFile(path string) error
 	ReadFile(path string) ([]byte, error)
 	LookPath(name string) bool
+	LinkExists(name string) bool
 }
 
 // ExecRunner 真实执行命令。
@@ -60,6 +62,11 @@ func (ExecRunner) ReadFile(path string) ([]byte, error) { return os.ReadFile(pat
 
 func (ExecRunner) LookPath(name string) bool {
 	_, err := exec.LookPath(name)
+	return err == nil
+}
+
+func (ExecRunner) LinkExists(name string) bool {
+	_, err := net.InterfaceByName(name)
 	return err == nil
 }
 
@@ -107,4 +114,8 @@ func (d *DryRunner) ReadFile(path string) ([]byte, error) {
 
 func (d *DryRunner) LookPath(name string) bool {
 	return d.Reader != nil && d.Reader.LookPath(name)
+}
+
+func (d *DryRunner) LinkExists(name string) bool {
+	return d.Reader == nil || d.Reader.LinkExists(name)
 }
