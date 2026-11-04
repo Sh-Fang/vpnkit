@@ -84,6 +84,7 @@ func (a *app) authClient() (*auth.Client, error) {
 		HIDField:          a.cfg.Auth.HIDField,
 		HIDLanguage:       a.cfg.Auth.HIDLanguage,
 		SubmitHIDEndpoint: a.cfg.Auth.SubmitHIDEndpoint,
+		HardIDEndpoint:    a.cfg.Auth.HardIDEndpoint,
 		Logger:            a.log,
 	})
 }

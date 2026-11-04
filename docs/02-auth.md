@@ -104,7 +104,7 @@ POST /por/login_hid.csp?manual_submit=1
 Content-Type: application/x-www-form-urlencoded
 Cookie: TWFID=<第 1 步的令牌>
 
-hid=<32 位大写十六进制>&hostname=<主机名>&macaddress=<MAC>&ignore=0
+hid=<32 位大写十六进制>&hostname=<主机名>&macaddress=<MAC>&ignore=0&svpn_req_randcode=<CSRF>
 ```
 
 四条硬约束，缺任何一条都会被网关判 `ErrorCode=20210`（`submit param error.`）：
@@ -114,7 +114,8 @@ hid=<32 位大写十六进制>&hostname=<主机名>&macaddress=<MAC>&ignore=0
 3. 字段名就是 `hid`，不是 `svpn_inputhid` 之类按 `auth/sms`→`svpn_inputsms` 规律外推的名字。
 4. 参数只放表单体。拼进 URL 查询串会被网关按未知路径处理，直接 404。
 
-这步不校验 CSRF：`login_psw` 那步的 CSRF 在这里没有意义，带上反而可能被拒。
+**反重放握手**：网关判 `20210` 时会在响应里回一个新的 `CSRF_RAND_CODE`，这是"带上新值再试一次"的信号，
+因此实现携带 `svpn_req_randcode`，并在被判 `20210` 时用响应里的新 CSRF 重试**一次**（不无限重试）。
 `hostname` 用 `os.Hostname()`，`macaddress` 用大写冒号分隔的 `AA:BB:CC:DD:EE:FF`；
 两者是给管理员审批时看的元数据，网关真正比对的是 `hid`。
 
@@ -122,7 +123,9 @@ hid=<32 位大写十六进制>&hostname=<主机名>&macaddress=<MAC>&ignore=0
 
 - 成功：`<Result>1</Result>` 或 `<ErrorCode>1</ErrorCode>`，可能换发新 `TwfID`，也可能沿用原令牌。
 - 还要求继续认证：带 `<NextAuth>`；本实现报 `ErrSecondFactor`，退出码 3。
-- `20210`：提交内容不被接受——先检查 `auth.hid_field`（默认 `hid`）与特征码格式（必须是 32 位大写十六进制）。
+- `20210`：提交内容不被接受。若带上新 CSRF 重试仍失败，实现会只读 GET 一次
+  `/por/hardid.csp?manual_submit=1`（`assumption=hardid_page`，`--trace` 下带正文），
+  那张页面的表单就是网关认可的字段清单，比继续猜可靠。
 
 ### 4.2 认证不过 = 设备没绑定
 

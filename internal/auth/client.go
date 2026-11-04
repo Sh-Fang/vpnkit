@@ -79,8 +79,10 @@ type Options struct {
 	HIDField       string // 特征码表单字段名
 	// 提交设备绑定申请（进管理员审批队列）的端点，参数走查询串（docs/02 §4.3）。
 	SubmitHIDEndpoint string
-	HIDLanguage       string
-	Logger            *slog.Logger
+	// 特征码页端点，只在诊断时只读 GET（docs/02 §4.1）。
+	HardIDEndpoint string
+	HIDLanguage    string
+	Logger         *slog.Logger
 	// HTTPClient 非空时覆盖默认客户端（测试用）。
 	HTTPClient *http.Client
 }
@@ -116,6 +118,9 @@ func New(o Options) (*Client, error) {
 	}
 	if o.SubmitHIDEndpoint == "" {
 		o.SubmitHIDEndpoint = "/por/submithid.csp"
+	}
+	if o.HardIDEndpoint == "" {
+		o.HardIDEndpoint = "/por/hardid.csp"
 	}
 	if o.HIDLanguage == "" {
 		o.HIDLanguage = "zh_CN"
@@ -293,7 +298,7 @@ func (c *Client) Login(ctx context.Context, req LoginRequest) (string, error) {
 		// auth/hid 是硬件特征码二次认证（docs/02 §4、docs/06）。仅在用户显式开启 register_device
 		// 时提交本机特征码，否则报错——避免普通登录静默把机器登记进网关的设备绑定队列。
 		if isHIDStep(rf["NextAuth"], rf["NextService"]) && c.o.RegisterDevice {
-			return c.submitHID(ctx, initial, req)
+			return c.submitHID(ctx, initial, rf["CSRF_RAND_CODE"], req)
 		}
 		hint := ""
 		if isHIDStep(rf["NextAuth"], rf["NextService"]) {
@@ -345,27 +350,33 @@ func (c *Client) hidLanguage() string {
 	return "zh_CN"
 }
 
-// submitHID 提交本机特征码，完成 auth/hid 这步二次认证（docs/02 §4、docs/06）。
+// submitHID 提交本机特征码，完成 auth/hid 这步二次认证（docs/02 §4.1、docs/06）。
 //
-// 请求形状取自官方客户端二进制：POST {endpoint}?type=cs&language=zh_CN&encrypt=1，
-// 表单体只有 hid=<32 位大写十六进制>。这步不校验 CSRF，也不带 MAC/主机名——
-// 那两个字段属于下一步「提交设备绑定申请」（submitHIDRegistration）。
-// 参数也不能塞进 login_hid 的查询串：网关会把它当未知路径直接 404。
-func (c *Client) submitHID(ctx context.Context, token string, req LoginRequest) (string, error) {
+// 请求形状取自 Web 端 SDK 的 loginHid：POST {endpoint}?manual_submit=1，
+// 表单体四个字段 hid / hostname / macaddress / ignore。
+//
+// 网关判 20210（submit param error）时会在响应里回一个新的 CSRF_RAND_CODE——
+// 这是反重放握手的重试信号，带上它再试一次即可，不能无限重试。
+func (c *Client) submitHID(ctx context.Context, token, csrf string, req LoginRequest) (string, error) {
 	if req.DeviceID == "" {
 		return "", fmt.Errorf("%w: %w", vpnerr.ErrAuth, ErrNeedDeviceID)
 	}
-	form := url.Values{}
-	form.Set(c.o.HIDField, req.DeviceID)
-	form.Set("hostname", req.Hostname)
-	form.Set("macaddress", req.MACAddress)
-	form.Set("ignore", "0")
-	logx.Assumption(c.log, "hid_submit", c.hidPath(),
-		"field", c.o.HIDField, "devid", logx.Mask(req.DeviceID),
-		"hostname", req.Hostname, "mac", logx.Mask(req.MACAddress))
-	res, err := c.postAuthForm(ctx, c.hidPath(), token, form)
-	if err != nil {
-		return "", err
+	var res authResult
+	for attempt := 0; ; attempt++ {
+		var err error
+		res, err = c.postHID(ctx, token, csrf, req)
+		if err != nil {
+			return "", err
+		}
+		if res.code != hidParamErrCode {
+			break
+		}
+		fresh := res.fields["CSRF_RAND_CODE"]
+		if attempt >= 1 || fresh == "" || fresh == csrf {
+			break
+		}
+		c.log.Debug("特征码这步被判 param error，带上网关刚发的 CSRF 重试一次")
+		csrf = fresh
 	}
 	logx.Assumption(c.log, "hid_result", res.fields["Result"],
 		"error_code", res.code, "next_auth", res.fields["NextAuth"], "message", res.message,
@@ -377,7 +388,10 @@ func (c *Client) submitHID(ctx context.Context, token string, req LoginRequest) 
 		return "", fmt.Errorf("%w: %w（特征码通过后仍需 NextAuth=%s NextService=%s）",
 			vpnerr.ErrAuth, ErrSecondFactor, res.fields["NextAuth"], res.fields["NextService"])
 	case res.code == hidParamErrCode:
-		return "", fmt.Errorf("%w: %w（网关判 param error：特征码字段 %q 或取值不被接受，可用 auth.hid_field 覆盖）",
+		// 仍被判参数错误：把网关那张特征码页读回来（只读 GET），它的表单就是权威的字段清单。
+		c.dumpHIDPage(ctx, token)
+		return "", fmt.Errorf("%w: %w（网关判 param error：字段 %q 或取值不被接受；"+
+			"确认 auth.hid_field 与 auth.hid_query，特征码须为 32 位大写十六进制）",
 			vpnerr.ErrAuth, ErrDevicePending, c.o.HIDField)
 	}
 	// 认证不通过又没被判 param error：多数是「未绑定的新设备」——认证步骤本身不负责登记，
@@ -394,6 +408,38 @@ func (c *Client) submitHID(ctx context.Context, token string, req LoginRequest) 
 		return "", fmt.Errorf("%w: %w（网关消息：%s）",
 			vpnerr.ErrAuth, ErrDevicePending, firstNonEmpty(res.message, "无"))
 	}
+}
+
+// dumpHIDPage 取一次特征码页（GET /por/hardid.csp?manual_submit=1）。
+// 这是只读请求，用来在 --trace 下看清网关实际要求的字段，避免继续猜。
+func (c *Client) dumpHIDPage(ctx context.Context, token string) {
+	if c.o.HardIDEndpoint == "" {
+		return
+	}
+	path := c.o.HardIDEndpoint + "?manual_submit=1"
+	b, status, err := c.get(ctx, path, token)
+	if err != nil {
+		c.log.Debug("读取特征码页失败", "err", err)
+		return
+	}
+	logx.Assumption(c.log, "hardid_page", status, "bytes", len(b), "tags", strings.Join(tagNames(b), ","))
+	logx.Trace(c.log, "hardid_page_body", "body", maskCSRFBody(b))
+}
+
+// postHID 发一次特征码认证请求。csrf 非空时一并回显（反重放握手）。
+func (c *Client) postHID(ctx context.Context, token, csrf string, req LoginRequest) (authResult, error) {
+	form := url.Values{}
+	form.Set(c.o.HIDField, req.DeviceID)
+	form.Set("hostname", req.Hostname)
+	form.Set("macaddress", req.MACAddress)
+	form.Set("ignore", "0")
+	if csrf != "" {
+		form.Set("svpn_req_randcode", csrf)
+	}
+	logx.Assumption(c.log, "hid_submit", c.hidPath(),
+		"field", c.o.HIDField, "devid", logx.Mask(req.DeviceID),
+		"hostname", req.Hostname, "mac", logx.Mask(req.MACAddress), "csrf_sent", csrf != "")
+	return c.postAuthForm(ctx, c.hidPath(), token, form)
 }
 
 // submitHIDRegistration 提交设备绑定申请，让这台机器进管理员审批队列（docs/02 §4.3、docs/06 §6）。

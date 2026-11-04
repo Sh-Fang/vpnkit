@@ -30,14 +30,20 @@ type AuthConfig struct {
 	// HIDField 是特征码提交字段名，默认 hid（与官方客户端一致）；HIDExpectDevID 非空时校验提交的特征码。
 	HIDField       string
 	HIDExpectDevID string
-	Captcha        bool
-	ConfXML        string
-	RCList         string
+	// HIDRejectFirstCSRF 模拟反重放握手：第一次 hid 提交一律回 20210 并换一个新 CSRF，
+	// 第二次必须回显新 CSRF 才放行。
+	HIDRejectFirstCSRF bool
+	// HardIDPage 是 /por/hardid.csp 返回的页面内容，诊断用。
+	HardIDPage string
+	Captcha    bool
+	ConfXML    string
+	RCList     string
 }
 
 type hidState struct {
-	csrf string
-	user string
+	csrf  string
+	user  string
+	tries int
 }
 
 type pending struct {
@@ -144,6 +150,7 @@ func (s *AuthServer) Handler() http.Handler {
 	mux.HandleFunc("/por/login_psw.csp", s.loginPsw)
 	mux.HandleFunc("/por/login_hid.csp", s.loginHID)
 	mux.HandleFunc("/por/submithid.csp", s.submitHID)
+	mux.HandleFunc("/por/hardid.csp", s.hardIDPage)
 	mux.HandleFunc("/por/conf.csp", s.authed(func(w http.ResponseWriter) { fmt.Fprint(w, s.cfg.ConfXML) }))
 	mux.HandleFunc("/por/rclist.csp", s.authed(func(w http.ResponseWriter) { fmt.Fprint(w, s.cfg.RCList) }))
 	return mux
@@ -291,8 +298,10 @@ func (s *AuthServer) loginHID(w http.ResponseWriter, r *http.Request) {
 	s.lastHID = r.PostForm
 	st, ok := s.hidPending[twf]
 	s.mu.Unlock()
+	// 判参数错误时一并回发当前 CSRF——真实网关就是这样给重试信号的。
 	fail := func(code, msg string) {
-		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>0</Result><ErrorCode>%s</ErrorCode><Message>%s</Message><Note>%s</Note></Auth>`, code, msg, msg)
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>0</Result><ErrorCode>%s</ErrorCode><Message>%s</Message><Note>%s</Note><CSRF_RAND_CODE>%s</CSRF_RAND_CODE></Auth>`,
+			code, msg, msg, st.csrf)
 	}
 	if !ok {
 		fail("30001", "no hid session")
@@ -304,6 +313,21 @@ func (s *AuthServer) loginHID(w http.ResponseWriter, r *http.Request) {
 			fail("20210", "submit param error: missing "+k)
 			return
 		}
+	}
+	// 反重放握手：第一次故意换发 CSRF，客户端须带上新值重试。
+	s.mu.Lock()
+	if s.cfg.HIDRejectFirstCSRF && st.tries == 0 {
+		st.tries = 1
+		st.csrf = randHex(8)
+		s.hidPending[twf] = st
+		s.mu.Unlock()
+		fail("20210", "submit param error.")
+		return
+	}
+	s.mu.Unlock()
+	if s.cfg.HIDRejectFirstCSRF && r.PostForm.Get("svpn_req_randcode") != st.csrf {
+		fail("20210", "submit param error.")
+		return
 	}
 	devid := r.PostForm.Get(s.cfg.HIDField)
 	if devid == "" {
@@ -320,6 +344,22 @@ func (s *AuthServer) loginHID(w http.ResponseWriter, r *http.Request) {
 	s.sessions[twf] = st.user
 	s.mu.Unlock()
 	fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>1</Result><Message>hid auth success</Message></Auth>`)
+}
+
+// hardIDPage 返回特征码页（诊断用，只读 GET）。
+func (s *AuthServer) hardIDPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if s.cfg.HardIDPage != "" {
+		fmt.Fprint(w, s.cfg.HardIDPage)
+		return
+	}
+	fmt.Fprint(w, `<html><body><form id="hidform">`+
+		`<input name="hid"><input name="hostname"><input name="macaddress">`+
+		`<input type="hidden" name="ignore" value="0"></form></body></html>`)
 }
 
 // submitHID 模拟设备绑定申请端点（docs/02 §4.2）：参数走表单体，三个字段。

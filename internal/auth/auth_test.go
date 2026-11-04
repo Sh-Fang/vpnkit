@@ -360,9 +360,9 @@ func TestLoginHIDRegisterSuccess(t *testing.T) {
 	if got := f.Get("ignore"); got != "0" {
 		t.Errorf("ignore = %q，期望 0", got)
 	}
-	// 这步不带 CSRF。
-	if f.Get("svpn_req_randcode") != "" {
-		t.Errorf("hid 表单不该带 CSRF: %v", f)
+	// 反重放：回显 login_psw 那步拿到的 CSRF。
+	if f.Get("svpn_req_randcode") == "" {
+		t.Errorf("hid 表单应带 CSRF: %v", f)
 	}
 	// 已绑定的机器不需要再提交绑定申请。
 	if got := as.LastSubmitHID(); got != nil {
@@ -452,5 +452,24 @@ func TestCertVerifyFailureHints(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Errorf("提示里缺少 %q: %v", want, err)
 		}
+	}
+}
+
+// TestLoginHIDCSRFRetry 验证反重放握手：网关第一次回 20210 并换发 CSRF，
+// 客户端带上新 CSRF 重试一次即通过（docs/02 §4.1）。
+func TestLoginHIDCSRFRetry(t *testing.T) {
+	as, c := newGateway(t, testserver.AuthConfig{
+		NextAuth: "4", NextService: "auth/hid",
+		HIDExpectDevID: testDevID, HIDRejectFirstCSRF: true,
+	}, func(o *Options) { o.RegisterDevice = true })
+	tok, err := c.Login(context.Background(), LoginRequest{
+		User: "alice", Password: "s3cret", DeviceID: testDevID,
+		MACAddress: "AA:BB:CC:DD:EE:01", Hostname: "test-host",
+	})
+	if err != nil {
+		t.Fatalf("hid retry login: %v", err)
+	}
+	if !as.ValidToken(tok) {
+		t.Fatalf("token %q 未登记", tok)
 	}
 }
