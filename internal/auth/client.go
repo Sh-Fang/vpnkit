@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -59,7 +58,7 @@ func (e *RejectError) Unwrap() []error { return []error{ErrLoginRejected, vpnerr
 // 特征码二次认证的线格式常量（docs/02 §4）。官方客户端把 type/language/encrypt 三个
 // 公共参数挂在每个认证请求的查询串上，`login_hid.csp` 的 body 只放特征码本身。
 const (
-	DefaultHIDQuery = "type=cs&language=zh_CN&encrypt=1"
+	DefaultHIDQuery = "manual_submit=1"
 	DefaultHIDField = "hid"
 )
 
@@ -358,10 +357,13 @@ func (c *Client) submitHID(ctx context.Context, token string, req LoginRequest) 
 	}
 	form := url.Values{}
 	form.Set(c.o.HIDField, req.DeviceID)
+	form.Set("hostname", req.Hostname)
+	form.Set("macaddress", req.MACAddress)
+	form.Set("ignore", "0")
 	logx.Assumption(c.log, "hid_submit", c.hidPath(),
 		"field", c.o.HIDField, "devid", logx.Mask(req.DeviceID),
-		"cookies", strings.Join(cookieNames(hidCookies(req)), ","))
-	res, err := c.postAuthForm(ctx, c.hidPath(), token, form, hidCookies(req)...)
+		"hostname", req.Hostname, "mac", logx.Mask(req.MACAddress))
+	res, err := c.postAuthForm(ctx, c.hidPath(), token, form)
 	if err != nil {
 		return "", err
 	}
@@ -403,20 +405,14 @@ func (c *Client) submitHIDRegistration(ctx context.Context, token string, req Lo
 	if req.DeviceID == "" {
 		return "", fmt.Errorf("%w: %w", vpnerr.ErrAuth, ErrNeedDeviceID)
 	}
-	if req.Hostname == "" || req.MACAddress == "" {
-		return "", fmt.Errorf("%w: 绑定申请需要主机名与 MAC 地址", vpnerr.ErrAuth)
-	}
-	q := url.Values{}
-	q.Set("type", "cs")
-	q.Set("language", c.hidLanguage())
-	q.Set("hid", req.DeviceID)
-	q.Set("hostname", req.Hostname)
-	q.Set("macaddress", req.MACAddress)
-	q.Set("rnd", strconv.FormatInt(time.Now().UnixMilli()&0xffffffff, 10))
-	// 查询串里有明文特征码与 MAC，只记录端点名，不记录完整 URL。
+	form := url.Values{}
+	form.Set("hid", req.DeviceID)
+	form.Set("hostname", req.Hostname)
+	form.Set("macaddress", req.MACAddress)
+	// 查询串里没有秘密，但特征码在表单体里，所以只记录端点名。
 	logx.Assumption(c.log, "hid_register", c.o.SubmitHIDEndpoint,
 		"devid", logx.Mask(req.DeviceID), "mac", logx.Mask(req.MACAddress), "hostname", req.Hostname)
-	res, err := c.postAuthForm(ctx, c.o.SubmitHIDEndpoint+"?"+q.Encode(), token, url.Values{})
+	res, err := c.postAuthForm(ctx, c.o.SubmitHIDEndpoint, token, form)
 	if err != nil {
 		return "", err
 	}
@@ -425,41 +421,6 @@ func (c *Client) submitHIDRegistration(ctx context.Context, token string, req Lo
 		return firstNonEmpty(res.token, token), nil
 	}
 	return "", fmt.Errorf("%w: %w（网关消息：%s）", vpnerr.ErrAuth, ErrDevicePending, firstNonEmpty(res.message, "无"))
-}
-
-// hidCookies 返回官方客户端在认证请求上并行发送的两个 cookie（docs/02 §4.1）。
-//
-// 它们承载的是「本机怎么称呼自己」：主机名的 base64、以及破折号分隔的 MAC。
-// 特征码那步网关会用它们和提交的特征码做一致性对照，缺了会被判 param error。
-func hidCookies(req LoginRequest) []*http.Cookie {
-	if req.Hostname == "" && req.MACAddress == "" {
-		return nil
-	}
-	var out []*http.Cookie
-	if req.Hostname != "" {
-		out = append(out, &http.Cookie{
-			Name:  "SSL_REMOTE_HOST",
-			Value: base64.StdEncoding.EncodeToString([]byte(req.Hostname)),
-			Path:  "/",
-		})
-	}
-	if req.MACAddress != "" {
-		out = append(out, &http.Cookie{
-			Name:  "SSL_REMOTE_MAC",
-			Value: strings.ReplaceAll(strings.ToUpper(req.MACAddress), ":", "-"),
-			Path:  "/",
-		})
-	}
-	return out
-}
-
-// cookieNames 只取 cookie 名，值不入日志。
-func cookieNames(cks []*http.Cookie) []string {
-	out := make([]string, 0, len(cks))
-	for _, ck := range cks {
-		out = append(out, ck.Name)
-	}
-	return out
 }
 
 // authResult 是一次认证请求响应的投影（docs/02 §4 各步共用的响应字段）。

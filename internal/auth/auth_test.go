@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"net"
@@ -334,7 +333,7 @@ func TestLoginSecondFactorRequired(t *testing.T) {
 const testDevID = "3F2A9C14B7E08D5612AB44CD990E7F31"
 
 func TestLoginHIDRegisterSuccess(t *testing.T) {
-	// 已绑定的机器：login_hid.csp 收到 hid=<特征码> 即完成二次认证（docs/02 §4）。
+	// 已绑定的机器：login_hid.csp 认下 hid 即完成二次认证（docs/02 §4.1）。
 	as, c := newGateway(t, testserver.AuthConfig{NextAuth: "4", NextService: "auth/hid", HIDExpectDevID: testDevID},
 		func(o *Options) { o.RegisterDevice = true })
 	tok, err := c.Login(context.Background(), LoginRequest{
@@ -347,24 +346,23 @@ func TestLoginHIDRegisterSuccess(t *testing.T) {
 	if !as.ValidToken(tok) {
 		t.Fatalf("token %q not registered after hid", tok)
 	}
-	// 官方客户端在认证请求上并行发这两个 cookie，网关用它和特征码做一致性对照（docs/02 §4.1）。
-	ck := as.LastHIDCookies()
-	if got, want := ck["SSL_REMOTE_HOST"], base64.StdEncoding.EncodeToString([]byte("test-host")); got != want {
-		t.Errorf("SSL_REMOTE_HOST = %q，期望 %q", got, want)
-	}
-	if got, want := ck["SSL_REMOTE_MAC"], "AA-BB-CC-DD-EE-01"; got != want {
-		t.Errorf("SSL_REMOTE_MAC = %q，期望 %q", got, want)
-	}
 	f := as.LastHIDForm()
+	// 四个字段缺一不可，形状取自 Web 端 SDK 的 loginHid（docs/02 §4.1）。
 	if f.Get("hid") != testDevID {
-		t.Errorf("hid 表单未带特征码: %v", f)
+		t.Errorf("hid = %q，期望 %q", f.Get("hid"), testDevID)
 	}
-	// 这步不需要 CSRF，也不该带 MAC/主机名——那是绑定申请的参数。
+	if got := f.Get("hostname"); got != "test-host" {
+		t.Errorf("hostname = %q", got)
+	}
+	if got := f.Get("macaddress"); got != "AA:BB:CC:DD:EE:01" {
+		t.Errorf("macaddress = %q", got)
+	}
+	if got := f.Get("ignore"); got != "0" {
+		t.Errorf("ignore = %q，期望 0", got)
+	}
+	// 这步不带 CSRF。
 	if f.Get("svpn_req_randcode") != "" {
 		t.Errorf("hid 表单不该带 CSRF: %v", f)
-	}
-	if f.Get("macaddress") != "" || f.Get("hostname") != "" {
-		t.Errorf("hid 表单不该带 mac/hostname: %v", f)
 	}
 	// 已绑定的机器不需要再提交绑定申请。
 	if got := as.LastSubmitHID(); got != nil {
@@ -418,8 +416,8 @@ func TestLoginHIDPendingApproval(t *testing.T) {
 	if q == nil {
 		t.Fatal("未提交绑定申请")
 	}
-	// 绑定申请的参数全在查询串上，形状取自官方客户端（docs/02 §4.3）。
-	for _, k := range []string{"type", "language", "hid", "hostname", "macaddress", "rnd"} {
+	// 绑定申请的参数走表单体，三个字段（docs/02 §4.2）。
+	for _, k := range []string{"hid", "hostname", "macaddress"} {
 		if q.Get(k) == "" {
 			t.Errorf("绑定申请缺参数 %s: %v", k, q)
 		}

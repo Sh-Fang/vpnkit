@@ -97,34 +97,26 @@ send_rand_code = false       # 未启用图形验证码时
 
 这一步是一次**纯特征码挑战**：网关拿你在册的硬件指纹和提交值比对，不涉及短信验证码、令牌或交互。
 
-**请求**
+请求由 Web 端 SDK 的 `loginHid` 发出，形状是固定的：
 
 ```
-POST /por/login_hid.csp?type=cs&language=zh_CN&encrypt=1
+POST /por/login_hid.csp?manual_submit=1
 Content-Type: application/x-www-form-urlencoded
 Cookie: TWFID=<第 1 步的令牌>
 
-hid=<32 位大写十六进制>
+hid=<32 位大写十六进制>&hostname=<主机名>&macaddress=<MAC>&ignore=0
 ```
 
-三条硬约束，违反任何一条都会被网关判 `ErrorCode=20210`（`submit param error.`）：
+四条硬约束，缺任何一条都会被网关判 `ErrorCode=20210`（`submit param error.`）：
 
-1. **表单字段名就是 `hid`**，不是 `svpn_inputhid` 之类按 `auth/sms`→`svpn_inputsms` 规律外推的名字。
-2. **参数只能放表单体**。把同样的参数拼进 URL 查询串会得到 404（网关按未知路径处理）。
-3. **这步不回显 CSRF**。`login_psw` 那步的 CSRF 在这里没有意义，带上反而可能被拒。
+1. 查询串是 **`manual_submit=1`**，不是 `type=cs&language=…&encrypt=1` 那一套。
+2. 表单体是**四个**字段：`hid`、`hostname`、`macaddress`、`ignore=0`。只发 `hid` 会被判参数错误。
+3. 字段名就是 `hid`，不是 `svpn_inputhid` 之类按 `auth/sms`→`svpn_inputsms` 规律外推的名字。
+4. 参数只放表单体。拼进 URL 查询串会被网关按未知路径处理，直接 404。
 
-`type` / `language` / `encrypt` 三个公共参数挂在查询串上，是该协议族所有认证端点的统一约定
-（`language` 只影响网关返回的可读消息语种，默认 `zh_CN`）。
-
-除表单体外，认证请求还并行带两个 cookie，内容是「本机怎么称呼自己」：
-
-| cookie | 取值 |
-|---|---|
-| `SSL_REMOTE_HOST` | 主机名的标准 base64 |
-| `SSL_REMOTE_MAC` | 大写十六进制、**破折号**分隔的 MAC，如 `AA-BB-CC-DD-EE-FF` |
-
-网关用它们和提交的特征码做一致性对照。注意 MAC 在这里是破折号分隔，
-而绑定申请（§4.2）的 `macaddress` 参数是冒号分隔，两者不要混用。
+这步不校验 CSRF：`login_psw` 那步的 CSRF 在这里没有意义，带上反而可能被拒。
+`hostname` 用 `os.Hostname()`，`macaddress` 用大写冒号分隔的 `AA:BB:CC:DD:EE:FF`；
+两者是给管理员审批时看的元数据，网关真正比对的是 `hid`。
 
 **响应**
 
@@ -135,17 +127,26 @@ hid=<32 位大写十六进制>
 ### 4.2 认证不过 = 设备没绑定
 
 `login_hid.csp` 只负责**认证**，不负责**登记**。机器没在网关侧绑定过时，这一步必然失败——
-此时网关会另有一个绑定申请端点，把机器送进管理员的审批队列：
+此时要另发一次绑定申请，把机器送进管理员的审批队列：
 
 ```
-POST /por/submithid.csp?type=cs&language=zh_CN&hid=<特征码>&hostname=<主机名>&macaddress=<MAC>&rnd=<毫秒计数值>
+POST /por/submithid.csp
+Content-Type: application/x-www-form-urlencoded
+
+hid=<特征码>&hostname=<主机名>&macaddress=<MAC>
 ```
 
-注意这组参数**全部走查询串**，没有表单体——和 `login_hid.csp` 正好相反，两者不能混用。
-`macaddress` 是大写冒号分隔的 `AA:BB:CC:DD:EE:FF`，`rnd` 只是毫秒计数值，没有校验含义。
+三个字段都在表单体里，没有查询串，也没有 `ignore`。`macaddress` 同样是冒号分隔。
 
 因此实现分两段：先 `login_hid.csp` 认证；失败且非 `20210` 时，若开启了设备提交，再发一次绑定申请，
 把网关消息透传给用户并报 `ErrDevicePending`（退出码 3），提示等待管理员审批。
+
+### 4.2.1 取特征码的本地接口
+
+界面上显示的特征码来自客户端本地服务，不是自己算的：`Q_HID` 查询返回
+`hid|macAddress|hostName` 三段以 `|` 分隔的字符串，`Q_ALLHID` 返回完整清单。
+本实现不依赖该本地服务，直接按 `docs/06` 计算，因此**算出的值必须与在册值一致**，
+否则网关侧看到的是一台陌生设备。
 
 ### 4.3 默认不提交
 
@@ -163,7 +164,7 @@ POST /por/submithid.csp?type=cs&language=zh_CN&hid=<特征码>&hostname=<主机�
 
 - `assumption=hid_submit`：端点 + 字段名 + 特征码掩码
 - `assumption=hid_result`：返回码、`NextAuth`、可读消息、是否换发令牌
-- `assumption=hid_register`：绑定申请端点的参数名与掩码后的取值（完整 URL 含明文特征码，不入日志）
+- `assumption=hid_register`：绑定申请端点的参数名与掩码后的取值（特征码明文不入日志）
 
 图形验证码：`RndImg=1` 时当前版本直接报错（退出码 3），暂不支持拉取验证码图片；`--captcha` 仅用于已知验证码的场景。
 

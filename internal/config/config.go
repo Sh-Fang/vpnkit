@@ -41,7 +41,7 @@ type Auth struct {
 	// （docs/02 §4、docs/06 §6），一般不需要改。
 	RegisterDevice bool   `toml:"register_device"` // true 时自动提交本机特征码
 	HIDEndpoint    string `toml:"hid_endpoint"`    // 认证这步，默认 /por/login_hid.csp
-	HIDQuery       string `toml:"hid_query"`       // 上面这个端点固定的查询串
+	HIDQuery       string `toml:"hid_query"`       // 上面这个端点固定的查询串，默认 manual_submit=1
 	HIDField       string `toml:"hid_field"`       // 特征码表单字段名，默认 hid
 	HIDLanguage    string `toml:"hid_language"`    // 绑定申请里的 language 参数，默认 zh_CN
 	// 提交设备绑定申请（进管理员审批队列）的端点，参数走查询串。
@@ -104,7 +104,7 @@ func Default() *Config {
 			SendDeviceID:      "auto",
 			DeviceIDField:     "devid",
 			HIDEndpoint:       "/por/login_hid.csp",
-			HIDQuery:          "type=cs&language=zh_CN&encrypt=1",
+			HIDQuery:          "manual_submit=1",
 			HIDField:          "hid",
 			HIDLanguage:       "zh_CN",
 			SubmitHIDEndpoint: "/por/submithid.csp",

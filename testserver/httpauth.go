@@ -267,11 +267,11 @@ func (s *AuthServer) loginPsw(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>1</Result><Message>login success</Message><TwfID>%s</TwfID></Auth>`, newID)
 }
 
-// loginHID 模拟特征码二次认证端点（docs/02 §4）。
+// loginHID 模拟特征码二次认证端点（docs/02 §4.1）。
 //
-// 真实网关要求：POST /por/login_hid.csp?type=cs&language=zh_CN&encrypt=1，
-// 表单体只有 hid=<特征码>，不校验 CSRF。字段不对返回 20210；特征码不是已绑定的那台机器
-// 则返回 30005，客户端随后改走 submithid.csp 提交绑定申请。
+// 真实请求形状：POST /por/login_hid.csp?manual_submit=1，
+// 表单体四个字段 hid / hostname / macaddress / ignore；缺任何一个返回 20210。
+// 特征码不是已绑定的那台机器则返回 30005，客户端随后改走 submithid.csp 提交绑定申请。
 func (s *AuthServer) loginHID(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		w.Header().Set("Content-Type", "text/xml")
@@ -289,10 +289,6 @@ func (s *AuthServer) loginHID(w http.ResponseWriter, r *http.Request) {
 	twf := token(r)
 	s.mu.Lock()
 	s.lastHID = r.PostForm
-	s.lastHIDCookies = map[string]string{}
-	for _, ck := range r.Cookies() {
-		s.lastHIDCookies[ck.Name] = ck.Value
-	}
 	st, ok := s.hidPending[twf]
 	s.mu.Unlock()
 	fail := func(code, msg string) {
@@ -302,9 +298,15 @@ func (s *AuthServer) loginHID(w http.ResponseWriter, r *http.Request) {
 		fail("30001", "no hid session")
 		return
 	}
+	// 四个字段缺一不可——真实网关就是靠这个判 20210 submit param error。
+	for _, k := range []string{s.cfg.HIDField, "hostname", "macaddress", "ignore"} {
+		if !r.PostForm.Has(k) {
+			fail("20210", "submit param error: missing "+k)
+			return
+		}
+	}
 	devid := r.PostForm.Get(s.cfg.HIDField)
 	if devid == "" {
-		// 参数不对（字段名或取值）——真实网关就是 20210 submit param error。
 		fail("20210", "submit param error.")
 		return
 	}
@@ -320,40 +322,33 @@ func (s *AuthServer) loginHID(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>1</Result><Message>hid auth success</Message></Auth>`)
 }
 
-// submitHID 模拟设备绑定申请端点（docs/02 §4.3）：参数全在查询串上，没有表单体。
+// submitHID 模拟设备绑定申请端点（docs/02 §4.2）：参数走表单体，三个字段。
 func (s *AuthServer) submitHID(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
-	q := r.URL.Query()
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	s.mu.Lock()
-	s.lastSubmitHID = q
+	s.lastSubmitHID = r.PostForm
 	s.mu.Unlock()
-	need := []string{"type", "language", "hid", "hostname", "macaddress", "rnd"}
-	for _, k := range need {
-		if q.Get(k) == "" {
+	for _, k := range []string{"hid", "hostname", "macaddress"} {
+		if !r.PostForm.Has(k) {
 			fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>0</Result><ErrorCode>20210</ErrorCode><Message>submit param error: %s</Message></Auth>`, k)
 			return
 		}
 	}
-	if s.cfg.HIDExpectDevID != "" && q.Get("hid") == s.cfg.HIDExpectDevID {
-		// 已绑定的机器不需要申请，直接放行。
+	if s.cfg.HIDExpectDevID != "" && r.PostForm.Get("hid") == s.cfg.HIDExpectDevID {
 		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>1</Result><Message>already bound</Message></Auth>`)
 		return
 	}
-	// 新机器：进管理员审批队列。
 	fmt.Fprint(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>0</Result><ErrorCode>30005</ErrorCode><Message>设备未被管理员授权，已提交审批申请</Message><Note>请联系管理员审批</Note></Auth>`)
 }
 
-// LastHIDCookies 返回最近一次特征码认证请求带的 cookie。
-func (s *AuthServer) LastHIDCookies() map[string]string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.lastHIDCookies
-}
-
-// LastSubmitHID 返回最近一次绑定申请的查询参数。
+// LastSubmitHID 返回最近一次绑定申请的表单。
 func (s *AuthServer) LastSubmitHID() url.Values {
 	s.mu.Lock()
 	defer s.mu.Unlock()
