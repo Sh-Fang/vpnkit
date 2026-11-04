@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -358,8 +359,9 @@ func (c *Client) submitHID(ctx context.Context, token string, req LoginRequest) 
 	form := url.Values{}
 	form.Set(c.o.HIDField, req.DeviceID)
 	logx.Assumption(c.log, "hid_submit", c.hidPath(),
-		"field", c.o.HIDField, "devid", logx.Mask(req.DeviceID))
-	res, err := c.postAuthForm(ctx, c.hidPath(), token, form)
+		"field", c.o.HIDField, "devid", logx.Mask(req.DeviceID),
+		"cookies", strings.Join(cookieNames(hidCookies(req)), ","))
+	res, err := c.postAuthForm(ctx, c.hidPath(), token, form, hidCookies(req)...)
 	if err != nil {
 		return "", err
 	}
@@ -425,6 +427,41 @@ func (c *Client) submitHIDRegistration(ctx context.Context, token string, req Lo
 	return "", fmt.Errorf("%w: %w（网关消息：%s）", vpnerr.ErrAuth, ErrDevicePending, firstNonEmpty(res.message, "无"))
 }
 
+// hidCookies 返回官方客户端在认证请求上并行发送的两个 cookie（docs/02 §4.1）。
+//
+// 它们承载的是「本机怎么称呼自己」：主机名的 base64、以及破折号分隔的 MAC。
+// 特征码那步网关会用它们和提交的特征码做一致性对照，缺了会被判 param error。
+func hidCookies(req LoginRequest) []*http.Cookie {
+	if req.Hostname == "" && req.MACAddress == "" {
+		return nil
+	}
+	var out []*http.Cookie
+	if req.Hostname != "" {
+		out = append(out, &http.Cookie{
+			Name:  "SSL_REMOTE_HOST",
+			Value: base64.StdEncoding.EncodeToString([]byte(req.Hostname)),
+			Path:  "/",
+		})
+	}
+	if req.MACAddress != "" {
+		out = append(out, &http.Cookie{
+			Name:  "SSL_REMOTE_MAC",
+			Value: strings.ReplaceAll(strings.ToUpper(req.MACAddress), ":", "-"),
+			Path:  "/",
+		})
+	}
+	return out
+}
+
+// cookieNames 只取 cookie 名，值不入日志。
+func cookieNames(cks []*http.Cookie) []string {
+	out := make([]string, 0, len(cks))
+	for _, ck := range cks {
+		out = append(out, ck.Name)
+	}
+	return out
+}
+
 // authResult 是一次认证请求响应的投影（docs/02 §4 各步共用的响应字段）。
 type authResult struct {
 	token   string // 网关换发的令牌；没有换发时为空
@@ -435,9 +472,9 @@ type authResult struct {
 }
 
 // postAuthForm 提交一个认证表单并解析响应。path 可含查询串。
-func (c *Client) postAuthForm(ctx context.Context, path, token string, form url.Values) (authResult, error) {
+func (c *Client) postAuthForm(ctx context.Context, path, token string, form url.Values, extra ...*http.Cookie) (authResult, error) {
 	var res authResult
-	resp, err := c.do(ctx, http.MethodPost, path, token, strings.NewReader(form.Encode()))
+	resp, err := c.do(ctx, http.MethodPost, path, token, strings.NewReader(form.Encode()), extra...)
 	if err != nil {
 		return res, err
 	}
@@ -532,7 +569,7 @@ func (c *Client) get(ctx context.Context, path, token string) ([]byte, int, erro
 	return b, resp.StatusCode, err
 }
 
-func (c *Client) do(ctx context.Context, method, path, token string, body io.Reader) (*http.Response, error) {
+func (c *Client) do(ctx context.Context, method, path, token string, body io.Reader, extra ...*http.Cookie) (*http.Response, error) {
 	u := c.base.String() + path
 	req, err := http.NewRequestWithContext(ctx, method, u, body)
 	if err != nil {
@@ -545,6 +582,9 @@ func (c *Client) do(ctx context.Context, method, path, token string, body io.Rea
 		// docs/02 §1 规定 TWFID 请求头；常见网关实际读 Cookie，两者都带，互不冲突。
 		req.Header.Set("TWFID", token)
 		req.AddCookie(&http.Cookie{Name: "TWFID", Value: token})
+	}
+	for _, ck := range extra {
+		req.AddCookie(ck)
 	}
 	req.Header.Set("User-Agent", "vpnkit")
 	c.log.Debug("HTTP 请求", "method", method, "path", strings.SplitN(path, "?", 2)[0])

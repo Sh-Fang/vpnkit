@@ -116,6 +116,16 @@ hid=<32 位大写十六进制>
 `type` / `language` / `encrypt` 三个公共参数挂在查询串上，是该协议族所有认证端点的统一约定
 （`language` 只影响网关返回的可读消息语种，默认 `zh_CN`）。
 
+除表单体外，认证请求还并行带两个 cookie，内容是「本机怎么称呼自己」：
+
+| cookie | 取值 |
+|---|---|
+| `SSL_REMOTE_HOST` | 主机名的标准 base64 |
+| `SSL_REMOTE_MAC` | 大写十六进制、**破折号**分隔的 MAC，如 `AA-BB-CC-DD-EE-FF` |
+
+网关用它们和提交的特征码做一致性对照。注意 MAC 在这里是破折号分隔，
+而绑定申请（§4.2）的 `macaddress` 参数是冒号分隔，两者不要混用。
+
 **响应**
 
 - 成功：`<Result>1</Result>` 或 `<ErrorCode>1</ErrorCode>`，可能换发新 `TwfID`，也可能沿用原令牌。

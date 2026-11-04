@@ -50,13 +50,14 @@ type AuthServer struct {
 	cfg        AuthConfig
 	keyA, keyB *rsa.PrivateKey
 
-	mu            sync.Mutex
-	pending       map[string]pending
-	hidPending    map[string]hidState // twf → 等待 hid 提交的会话
-	sessions      map[string]string   // token → user
-	lastForm      url.Values
-	lastHID       url.Values
-	lastSubmitHID url.Values
+	mu             sync.Mutex
+	pending        map[string]pending
+	hidPending     map[string]hidState // twf → 等待 hid 提交的会话
+	sessions       map[string]string   // token → user
+	lastForm       url.Values
+	lastHID        url.Values
+	lastHIDCookies map[string]string
+	lastSubmitHID  url.Values
 }
 
 func NewAuthServer(cfg AuthConfig) (*AuthServer, error) {
@@ -288,6 +289,10 @@ func (s *AuthServer) loginHID(w http.ResponseWriter, r *http.Request) {
 	twf := token(r)
 	s.mu.Lock()
 	s.lastHID = r.PostForm
+	s.lastHIDCookies = map[string]string{}
+	for _, ck := range r.Cookies() {
+		s.lastHIDCookies[ck.Name] = ck.Value
+	}
 	st, ok := s.hidPending[twf]
 	s.mu.Unlock()
 	fail := func(code, msg string) {
@@ -339,6 +344,13 @@ func (s *AuthServer) submitHID(w http.ResponseWriter, r *http.Request) {
 	}
 	// 新机器：进管理员审批队列。
 	fmt.Fprint(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>0</Result><ErrorCode>30005</ErrorCode><Message>设备未被管理员授权，已提交审批申请</Message><Note>请联系管理员审批</Note></Auth>`)
+}
+
+// LastHIDCookies 返回最近一次特征码认证请求带的 cookie。
+func (s *AuthServer) LastHIDCookies() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastHIDCookies
 }
 
 // LastSubmitHID 返回最近一次绑定申请的查询参数。

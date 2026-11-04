@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"net"
@@ -336,12 +337,23 @@ func TestLoginHIDRegisterSuccess(t *testing.T) {
 	// 已绑定的机器：login_hid.csp 收到 hid=<特征码> 即完成二次认证（docs/02 §4）。
 	as, c := newGateway(t, testserver.AuthConfig{NextAuth: "4", NextService: "auth/hid", HIDExpectDevID: testDevID},
 		func(o *Options) { o.RegisterDevice = true })
-	tok, err := c.Login(context.Background(), LoginRequest{User: "alice", Password: "s3cret", DeviceID: testDevID})
+	tok, err := c.Login(context.Background(), LoginRequest{
+		User: "alice", Password: "s3cret", DeviceID: testDevID,
+		MACAddress: "AA:BB:CC:DD:EE:01", Hostname: "test-host",
+	})
 	if err != nil {
 		t.Fatalf("hid login: %v", err)
 	}
 	if !as.ValidToken(tok) {
 		t.Fatalf("token %q not registered after hid", tok)
+	}
+	// 官方客户端在认证请求上并行发这两个 cookie，网关用它和特征码做一致性对照（docs/02 §4.1）。
+	ck := as.LastHIDCookies()
+	if got, want := ck["SSL_REMOTE_HOST"], base64.StdEncoding.EncodeToString([]byte("test-host")); got != want {
+		t.Errorf("SSL_REMOTE_HOST = %q，期望 %q", got, want)
+	}
+	if got, want := ck["SSL_REMOTE_MAC"], "AA-BB-CC-DD-EE-01"; got != want {
+		t.Errorf("SSL_REMOTE_MAC = %q，期望 %q", got, want)
 	}
 	f := as.LastHIDForm()
 	if f.Get("hid") != testDevID {
