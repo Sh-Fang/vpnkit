@@ -400,8 +400,21 @@ func TestLoginHIDParamError(t *testing.T) {
 	if !errors.Is(err, ErrDevicePending) {
 		t.Fatalf("got %v", err)
 	}
-	if as.LastSubmitHID() == nil {
-		t.Error("认证被拒后应尝试提交绑定申请")
+	sub := as.LastSubmitHID()
+	if sub == nil {
+		t.Fatal("认证被拒后应尝试提交绑定申请")
+	}
+	// 官方客户端的绑定申请是查询串形状，type=cs 不能少（docs/02 §4.3）。
+	for k, want := range map[string]string{
+		"type": "cs", "language": "zh_CN", "hid": testDevID,
+		"hostname": "test-host", "macaddress": "AA:BB:CC:DD:EE:01",
+	} {
+		if got := sub.Get(k); got != want {
+			t.Errorf("绑定申请 %s = %q，期望 %q", k, got, want)
+		}
+	}
+	if sub.Get("rnd") == "" {
+		t.Error("绑定申请应带 rnd")
 	}
 }
 

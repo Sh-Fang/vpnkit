@@ -379,16 +379,17 @@ func (s *AuthServer) submitHID(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// 官方客户端把参数放查询串，Web SDK 放表单体；两种都接受，用合并后的 r.Form。
 	s.mu.Lock()
-	s.lastSubmitHID = r.PostForm
+	s.lastSubmitHID = r.Form
 	s.mu.Unlock()
 	for _, k := range []string{"hid", "hostname", "macaddress"} {
-		if !r.PostForm.Has(k) {
+		if !r.Form.Has(k) {
 			fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>0</Result><ErrorCode>20210</ErrorCode><Message>submit param error: %s</Message></Auth>`, k)
 			return
 		}
 	}
-	if s.cfg.AutoApproveHID || (s.cfg.HIDExpectDevID != "" && r.PostForm.Get("hid") == s.cfg.HIDExpectDevID) {
+	if s.cfg.AutoApproveHID || (s.cfg.HIDExpectDevID != "" && r.Form.Get("hid") == s.cfg.HIDExpectDevID) {
 		s.mu.Lock()
 		s.hidBound = true
 		s.mu.Unlock()

@@ -137,13 +137,16 @@ hid=<32 位大写十六进制>&hostname=<base64 主机名>&macaddress=<aa-bb-cc-
 此时要另发一次绑定申请，把机器送进管理员的审批队列：
 
 ```
-POST /por/submithid.csp
-Content-Type: application/x-www-form-urlencoded
-
-hid=<特征码>&hostname=<base64 主机名>&macaddress=<aa-bb-cc-dd-ee-ff>
+POST /por/submithid.csp?type=cs&language=zh_CN&hid=<特征码>&hostname=<base64 主机名>&macaddress=<aa-bb-cc-dd-ee-ff>&rnd=<毫秒>
 ```
 
-三个字段都在表单体里，没有查询串，也没有 `ignore`。三段值的形状与 §4.1 完全一致。
+参数走**查询串**，形态取自客户端里拼这个 URL 的格式串，没有 `ignore`。
+`type=cs` 不能省：缺了它网关回 `20002`（`Operation failed`）而不是参数错误，
+很容易被误判成"会话状态不对"。`rnd` 是毫秒级计数值，没有校验意义。
+三段值的形状与 §4.1 完全一致。
+
+对照：Web 端 SDK 的 `submitHid` 把三个字段放表单体。两种形状客户端都在用，
+本实现选**查询串**这一种，因为它带 `type=cs`——这正是把 `20002` 与参数错误区分开的那个字段。
 
 网关的特征码页（`GET /por/hardid.csp?manual_submit=1`）会直接说明该走哪条路，典型回执：
 

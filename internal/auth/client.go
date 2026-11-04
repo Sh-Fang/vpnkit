@@ -473,14 +473,25 @@ func (c *Client) submitHIDRegistration(ctx context.Context, token string, req Lo
 	if req.DeviceID == "" {
 		return "", fmt.Errorf("%w: %w", vpnerr.ErrAuth, ErrNeedDeviceID)
 	}
-	form := url.Values{}
-	form.Set("hid", req.DeviceID)
-	form.Set("hostname", req.Hostname)
-	form.Set("macaddress", req.MACAddress)
-	// 查询串里没有秘密，但特征码在表单体里，所以只记录端点名。
+	// type=cs 不能少：缺了它网关回 20002（Operation failed），而不是参数错误，
+	// 容易被误判成"会话状态不对"。
+	q := url.Values{}
+	q.Set("type", "cs")
+	q.Set("language", c.hidLanguage())
+	q.Set("hid", req.DeviceID)
+	q.Set("hostname", req.Hostname)
+	q.Set("macaddress", req.MACAddress)
+	q.Set("rnd", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	path := c.o.SubmitHIDEndpoint
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	path += sep + q.Encode()
 	logx.Assumption(c.log, "hid_register", c.o.SubmitHIDEndpoint,
-		"devid", logx.Mask(req.DeviceID), "mac", logx.Mask(req.MACAddress), "hostname", req.Hostname)
-	res, err := c.postAuthForm(ctx, c.o.SubmitHIDEndpoint, token, form)
+		"devid", logx.Mask(req.DeviceID), "mac", logx.Mask(req.MACAddress),
+		"hostname", req.Hostname, "language", c.hidLanguage())
+	res, err := c.postAuthForm(ctx, path, token, url.Values{})
 	if err != nil {
 		return "", err
 	}
