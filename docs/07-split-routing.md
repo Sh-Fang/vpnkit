@@ -133,6 +133,20 @@ Get-DnsClientNrptRule | Where-Object {$_.Comment -eq "vpnkit"} | Remove-DnsClien
 
 给每条规则加 `-Comment "vpnkit"`，便于精确清理。
 
+组策略 NRPT 键 `HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig` 存在时（**即使为空**），Windows 忽略全部本地 NRPT 规则。实测：往该键里写规则，即使 `RefreshPolicyEx(RP_FORCE)` 强制刷新，DNS 客户端运行时也不读取；删除空键后本地规则立即生效。因此：
+
+- 键不存在：照常添加本地规则。
+- 键存在且为空（无子键、无值）：`up` 先删除它，并在 `state.json` 记 `nrpt_policy_key_removed`；`down` 与异常退出后的清理按记录重建空键。删除命令执行时会再检查一次是否为空。
+- 键非空：说明确有组策略在管 NRPT，不碰，告警 DNS 分区不生效。
+- 运行期间每 30 秒检查一次：组策略刷新重建了空键就再次删除；重建后非空则告警一次。
+
+**Windows 系统代理例外** —— 开着 Clash 等工具的"系统代理"时，浏览器把请求交给代理，代理自己解析域名，不经过 NRPT，内网域名会被解析成公网入口或解析失败。因此 `up` 把内网网段与域名后缀追加到当前用户的系统代理例外（`HKCU\...\Internet Settings` 的 `ProxyOverride`），让浏览器对它们直连、由系统解析：
+
+- 例外只认通配符：网段按整字节边界写成 `10.*`、`172.16.*`（非整字节网段展开，超过 16 条退到更粗一级），后缀写成 `corp.example.com` 与 `*.corp.example.com`。只有 DNS 分区启用时才加后缀。
+- 只追加原本没有的条目，记入 `state.json` 的 `proxy_bypass_added`；`down` 与异常退出后的清理只删这些。
+- 运行期间每 30 秒检查一次，被代理工具改写就补回。
+- 代理工具的"虚拟网卡 / TUN 模式"会接管全部 DNS，不在此范围内。
+
 ### 3.4 兜底
 
 拿不到内网域名后缀时（服务端未下发）：

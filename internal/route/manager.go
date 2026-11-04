@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Sh-Fang/vpnkit/internal/logx"
@@ -27,7 +28,11 @@ type Manager struct {
 	Dir string
 	Log *slog.Logger
 
+	mu sync.Mutex
 	st *State
+	// policyWarned、proxyWarned 避免 Maintain 每轮重复告警同一件事。
+	policyWarned bool
+	proxyWarned  bool
 }
 
 func (m *Manager) log() *slog.Logger { return logx.Or(m.Log) }
@@ -40,6 +45,8 @@ func (m *Manager) save() {
 
 // Apply 依次下发：防回环路由 → TUN 地址/MTU → 内网网段路由 → 分区 DNS。
 func (m *Manager) Apply(ctx context.Context, p Plan) (Result, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	var res Result
 	if m.st == nil {
 		m.st = &State{PID: os.Getpid(), GOOS: m.GOOS, Tun: p.Device, StartedAt: time.Now().UTC()}
@@ -48,7 +55,7 @@ func (m *Manager) Apply(ctx context.Context, p Plan) (Result, error) {
 	m.save()
 
 	fail := func(err error) (Result, error) {
-		if terr := m.Teardown(ctx); terr != nil {
+		if terr := m.teardown(ctx); terr != nil {
 			m.log().Error("回滚时出错", "err", terr)
 		}
 		return Result{}, err
@@ -131,7 +138,61 @@ func (m *Manager) Apply(ctx context.Context, p Plan) (Result, error) {
 		res.DNSEnabled = ok
 		res.Warnings = append(res.Warnings, warns...)
 	}
+
+	// 5. 系统代理例外：开着 Clash 等系统代理时，浏览器把内网请求交给代理，代理自己解析域名，
+	// 绕过分区 DNS；把内网网段与域名加进例外，让浏览器直连、由系统解析。
+	if m.GOOS == "windows" {
+		var sfx []string
+		if res.DNSEnabled {
+			sfx = p.DNSSuffixes
+		}
+		if w := m.applyProxyBypass(ctx, ProxyBypassEntries(res.RoutesOK, sfx)); w != "" {
+			res.Warnings = append(res.Warnings, w)
+		}
+	}
 	return res, nil
+}
+
+// missingBypass 返回 want 中当前系统代理例外里没有的条目。
+func (m *Manager) missingBypass(ctx context.Context, want []string) ([]string, error) {
+	out, err := m.R.Query(ctx, WindowsProxyBypassQueryCmd())
+	if err != nil {
+		return nil, err
+	}
+	have := map[string]bool{}
+	for _, e := range ParseProxyBypass(string(out)) {
+		have[strings.ToLower(e)] = true
+	}
+	var miss []string
+	for _, e := range want {
+		if !have[strings.ToLower(e)] {
+			miss = append(miss, e)
+		}
+	}
+	return miss, nil
+}
+
+// applyProxyBypass 只追加原本没有的条目并记录，down 时只删这些，不动用户或代理工具自己的例外。
+func (m *Manager) applyProxyBypass(ctx context.Context, entries []string) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	miss, err := m.missingBypass(ctx, entries)
+	if err != nil {
+		return "无法读取系统代理例外，开着系统代理时内网可能走代理: " + err.Error()
+	}
+	if len(miss) == 0 {
+		return ""
+	}
+	m.st.ProxyBypassAdded = miss
+	m.save()
+	if _, err := m.R.Run(ctx, WindowsProxyBypassAddCmd(miss)); err != nil {
+		m.st.ProxyBypassAdded = nil
+		m.save()
+		return "添加系统代理例外失败，开着系统代理时内网可能走代理: " + err.Error()
+	}
+	m.log().Info("内网网段与域名已加入系统代理例外，down 时移除", "entries", len(miss))
+	return ""
 }
 
 func (m *Manager) applyDNS(ctx context.Context, p Plan) (bool, []string) {
@@ -157,6 +218,9 @@ func (m *Manager) applyDNS(ctx context.Context, p Plan) (bool, []string) {
 		}
 		return any, warns
 	case "windows":
+		if w := m.hideEmptyPolicyKey(ctx); w != "" {
+			warns = append(warns, w)
+		}
 		m.st.NRPTAdded = append(m.st.NRPTAdded, p.DNSSuffixes...)
 		m.save()
 		if _, err := m.R.Run(ctx, WindowsNRPTAddCmd(p.DNSServers, p.DNSSuffixes)); err != nil {
@@ -185,8 +249,106 @@ func (m *Manager) applyDNS(ctx context.Context, p Plan) (bool, []string) {
 	}
 }
 
+// hideEmptyPolicyKey 在组策略 NRPT 键为空时临时删除它，让本地 NRPT 规则生效；返回需要告警的内容。
+// 键非空说明确有组策略在管 NRPT，不碰，只告警。
+func (m *Manager) hideEmptyPolicyKey(ctx context.Context) string {
+	out, err := m.R.Query(ctx, WindowsNRPTPolicyQueryCmd())
+	var exists, empty bool
+	if err == nil {
+		exists, empty, err = ParseNRPTPolicy(string(out))
+	}
+	switch {
+	case err != nil:
+		return "无法检查组策略 NRPT 键，DNS 分区可能不生效: " + err.Error()
+	case !exists:
+		return ""
+	case !empty:
+		return "组策略 NRPT 键非空，Windows 会忽略本地 NRPT 规则，DNS 分区不生效: " + NRPTPolicyKey
+	default:
+	}
+	m.st.NRPTPolicyKeyRemoved = true
+	m.save()
+	if _, err := m.R.Run(ctx, WindowsNRPTPolicyRemoveCmd()); err != nil {
+		m.st.NRPTPolicyKeyRemoved = false
+		m.save()
+		return "删除空的组策略 NRPT 键失败，DNS 分区不生效: " + err.Error()
+	}
+	m.log().Info("临时移除空的组策略 NRPT 键，down 时重建", "key", NRPTPolicyKey)
+	return ""
+}
+
+// Maintain 供运行期间周期调用，修复被外部改回的配置：
+// 组策略刷新可能重建 up 时删掉的空键；代理工具切换系统代理时可能重写代理例外。
+func (m *Manager) Maintain(ctx context.Context) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.st == nil {
+		return nil
+	}
+	return append(m.maintainPolicyKey(ctx), m.maintainProxyBypass(ctx)...)
+}
+
+func (m *Manager) maintainProxyBypass(ctx context.Context) []string {
+	if len(m.st.ProxyBypassAdded) == 0 {
+		return nil
+	}
+	miss, err := m.missingBypass(ctx, m.st.ProxyBypassAdded)
+	if err == nil && len(miss) > 0 {
+		_, err = m.R.Run(ctx, WindowsProxyBypassAddCmd(miss))
+		if err == nil {
+			m.log().Info("系统代理例外被改写，已重新加入", "entries", len(miss))
+		}
+	}
+	if err != nil {
+		return warnOnce(&m.proxyWarned, "系统代理例外被改写，恢复失败，开着系统代理时内网可能走代理: "+err.Error())
+	}
+	m.proxyWarned = false
+	return nil
+}
+
+func (m *Manager) maintainPolicyKey(ctx context.Context) []string {
+	if !m.st.NRPTPolicyKeyRemoved {
+		return nil
+	}
+	out, err := m.R.Query(ctx, WindowsNRPTPolicyQueryCmd())
+	var exists, empty bool
+	if err == nil {
+		exists, empty, err = ParseNRPTPolicy(string(out))
+	}
+	switch {
+	case err != nil:
+		return warnOnce(&m.policyWarned, "无法检查组策略 NRPT 键: "+err.Error())
+	case !exists:
+		m.policyWarned = false
+		return nil
+	case !empty:
+		return warnOnce(&m.policyWarned, "组策略 NRPT 键被重建且非空，DNS 分区已失效: "+NRPTPolicyKey)
+	default:
+	}
+	if _, err := m.R.Run(ctx, WindowsNRPTPolicyRemoveCmd()); err != nil {
+		return warnOnce(&m.policyWarned, "组策略 NRPT 键被重建，再次删除失败，DNS 分区已失效: "+err.Error())
+	}
+	m.log().Info("组策略 NRPT 键被重建，已再次移除", "key", NRPTPolicyKey)
+	m.policyWarned = false
+	return nil
+}
+
+func warnOnce(warned *bool, w string) []string {
+	if *warned {
+		return nil
+	}
+	*warned = true
+	return []string{w}
+}
+
 // Teardown 按记录逆序撤销全部变更；清理失败不中断，收集后一并返回（docs/07 §6）。
 func (m *Manager) Teardown(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.teardown(ctx)
+}
+
+func (m *Manager) teardown(ctx context.Context) error {
 	if m.st == nil {
 		return nil
 	}
@@ -213,12 +375,26 @@ func Cleanup(ctx context.Context, r Runner, st *State, log *slog.Logger) []error
 		}
 		return nil
 	}
+	if len(st.ProxyBypassAdded) > 0 {
+		if err := run(WindowsProxyBypassDelCmd(st.ProxyBypassAdded)); err != nil {
+			errs = append(errs, err)
+		} else {
+			st.ProxyBypassAdded = nil
+		}
+	}
 	// DNS
 	if len(st.NRPTAdded) > 0 {
 		if err := run(WindowsNRPTDelCmd()); err != nil {
 			errs = append(errs, err)
 		} else {
 			st.NRPTAdded = nil
+		}
+	}
+	if st.NRPTPolicyKeyRemoved {
+		if err := run(WindowsNRPTPolicyRestoreCmd()); err != nil {
+			errs = append(errs, err)
+		} else {
+			st.NRPTPolicyKeyRemoved = false
 		}
 	}
 	if st.ResolvectlLink != "" {

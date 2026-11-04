@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/netip"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -130,14 +132,21 @@ func (f *fakeRunner) Run(_ context.Context, argv []string) ([]byte, error) {
 	return nil, nil
 }
 
+// Query 取最长匹配前缀，让具体命令的桩优先于 "powershell" 这类宽泛前缀。
 func (f *fakeRunner) Query(_ context.Context, argv []string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	c := strings.Join(argv, " ")
-	for p, out := range f.query {
-		if strings.HasPrefix(c, p) {
-			return []byte(out), nil
+	best, out := -1, ""
+	for p, o := range f.query {
+		if strings.HasPrefix(c, p) && len(p) > best {
+			best, out = len(p), o
 		}
 	}
-	return nil, errors.New("query failed")
+	if best < 0 {
+		return nil, errors.New("query failed")
+	}
+	return []byte(out), nil
 }
 
 func (f *fakeRunner) WriteFile(p, c string) error {
@@ -343,6 +352,105 @@ func TestWindowsNRPT(t *testing.T) {
 	}
 }
 
+var policyQuery = strings.Join(WindowsNRPTPolicyQueryCmd(), " ")
+
+func windowsManager(t *testing.T, policy string) (*fakeRunner, *Manager, Plan) {
+	t.Helper()
+	f := newFake()
+	f.query["powershell"] = "12 192.168.1.1"
+	f.query[policyQuery] = policy
+	p := plan()
+	p.Device = WindowsAdapter
+	return f, &Manager{GOOS: "windows", R: f, Dir: t.TempDir()}, p
+}
+
+func TestWindowsEmptyPolicyKeyHiddenAndRestored(t *testing.T) {
+	f, m, p := windowsManager(t, "0 0")
+	res, err := m.Apply(context.Background(), p)
+	if err != nil || !res.DNSEnabled || len(res.Warnings) != 0 {
+		t.Fatal(err, res)
+	}
+	all := f.all()
+	rm := strings.Index(all, "Remove-Item -LiteralPath $k }")
+	add := strings.Index(all, "Add-DnsClientNrptRule")
+	if rm < 0 || add < rm {
+		t.Fatalf("empty policy key must be removed before adding NRPT:\n%s", all)
+	}
+	if st, _ := LoadState(m.Dir); st == nil || !st.NRPTPolicyKeyRemoved {
+		t.Fatal("state must record removal")
+	}
+	f.cmds = nil
+	if err := m.Teardown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(f.all(), "New-Item -Path $k") {
+		t.Fatal(f.all())
+	}
+}
+
+func TestWindowsNonEmptyPolicyKeyUntouched(t *testing.T) {
+	f, m, p := windowsManager(t, "1 0")
+	res, err := m.Apply(context.Background(), p)
+	if err != nil || !strings.Contains(strings.Join(res.Warnings, " "), "非空") {
+		t.Fatal(err, res.Warnings)
+	}
+	if strings.Contains(f.all(), "Remove-Item") {
+		t.Fatal(f.all())
+	}
+	if st, _ := LoadState(m.Dir); st.NRPTPolicyKeyRemoved {
+		t.Fatal("must not record removal")
+	}
+}
+
+func TestWindowsMaintainPolicyKey(t *testing.T) {
+	f, m, p := windowsManager(t, "0 0")
+	if _, err := m.Apply(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	// 组策略刷新重建了空键：再次删除，不告警
+	f.cmds = nil
+	if w := m.Maintain(context.Background()); len(w) != 0 || !strings.Contains(f.all(), "Remove-Item") {
+		t.Fatal(w, f.all())
+	}
+	// 重建后非空：只告警一次，不删
+	f.mu.Lock()
+	f.query[policyQuery] = "1 2"
+	f.cmds = nil
+	f.mu.Unlock()
+	if w := m.Maintain(context.Background()); len(w) != 1 {
+		t.Fatal(w)
+	}
+	if w := m.Maintain(context.Background()); len(w) != 0 || strings.Contains(f.all(), "Remove-Item") {
+		t.Fatal(w, f.all())
+	}
+}
+
+func TestRecoverRestoresPolicyKey(t *testing.T) {
+	dir := t.TempDir()
+	saveState(dir, &State{PID: 999999, GOOS: "windows", Tun: "vpnkit", NRPTAdded: []string{".corp.example.com"}, NRPTPolicyKeyRemoved: true})
+	f := newFake()
+	f.linkGone = true
+	if ok, err := Recover(context.Background(), dir, f, nil, func(int) bool { return false }); !ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	if !strings.Contains(f.all(), "New-Item -Path $k") {
+		t.Fatal(f.all())
+	}
+}
+
+func TestParseNRPTPolicy(t *testing.T) {
+	for _, c := range []struct {
+		out           string
+		exists, empty bool
+		bad           bool
+	}{{"absent\r\n", false, false, false}, {"0 0\r\n", true, true, false}, {"2 0", true, false, false}, {"0 5", true, false, false}, {"", false, false, true}} {
+		e, em, err := ParseNRPTPolicy(c.out)
+		if e != c.exists || em != c.empty || (err != nil) != c.bad {
+			t.Errorf("%q: %v %v %v", c.out, e, em, err)
+		}
+	}
+}
+
 func TestRecover(t *testing.T) {
 	dir := t.TempDir()
 	saveState(dir, &State{PID: 999999, GOOS: "linux", Tun: "tun0", RoutesAdded: []string{"10.0.0.0/8"}, BypassAdded: []string{"203.0.113.9"}})
@@ -421,5 +529,77 @@ func TestDryRunner(t *testing.T) {
 	}
 	if len(f.cmds) != 0 {
 		t.Fatal("dry-run must not execute mutating commands")
+	}
+}
+
+func TestProxyBypassEntries(t *testing.T) {
+	routes := []netip.Prefix{
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("10.0.0.0/9"),
+		netip.MustParsePrefix("172.16.0.0/12"),
+		netip.MustParsePrefix("198.18.0.0/24"),
+		netip.MustParsePrefix("198.51.100.53/32"),
+		netip.MustParsePrefix("0.0.0.0/1"),
+	}
+	got := ProxyBypassEntries(routes, []string{"corp.example.com", "bad';x"})
+	want := []string{"10.*"}
+	for i := 16; i < 32; i++ {
+		want = append(want, "172."+strconv.Itoa(i)+".*")
+	}
+	want = append(want, "198.18.0.*", "198.51.100.53", "corp.example.com", "*.corp.example.com")
+	if strings.Join(got, ";") != strings.Join(want, ";") {
+		t.Fatalf("got  %v\nwant %v", got, want)
+	}
+	if got := ParseProxyBypass(" localhost; 10.*;;<local>\r\n"); strings.Join(got, "|") != "localhost|10.*|<local>" {
+		t.Fatal(got)
+	}
+}
+
+var proxyQuery = strings.Join(WindowsProxyBypassQueryCmd(), " ")
+
+func TestWindowsProxyBypassAddedAndRemoved(t *testing.T) {
+	f, m, p := windowsManager(t, "absent")
+	f.query[proxyQuery] = "localhost;10.*;<local>"
+	if _, err := m.Apply(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := LoadState(m.Dir)
+	if st == nil || len(st.ProxyBypassAdded) == 0 || slices.Contains(st.ProxyBypassAdded, "10.*") {
+		t.Fatalf("only missing entries must be recorded: %+v", st)
+	}
+	if !slices.Contains(st.ProxyBypassAdded, "*.corp.example.com") || !strings.Contains(f.all(), "ProxyOverride") {
+		t.Fatal(st.ProxyBypassAdded, f.all())
+	}
+	f.cmds = nil
+	if err := m.Teardown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	del := strings.Join(WindowsProxyBypassDelCmd(st.ProxyBypassAdded), " ")
+	if !strings.Contains(f.all(), del) {
+		t.Fatal(f.all())
+	}
+}
+
+func TestWindowsMaintainProxyBypass(t *testing.T) {
+	f, m, p := windowsManager(t, "absent")
+	f.query[proxyQuery] = ""
+	if _, err := m.Apply(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := LoadState(m.Dir)
+	// 例外都还在：不动
+	f.mu.Lock()
+	f.query[proxyQuery] = strings.Join(st.ProxyBypassAdded, ";")
+	f.cmds = nil
+	f.mu.Unlock()
+	if w := m.Maintain(context.Background()); len(w) != 0 || strings.Contains(f.all(), "Set-ItemProperty") {
+		t.Fatal(w, f.all())
+	}
+	// 被代理工具改写：补回缺的
+	f.mu.Lock()
+	f.query[proxyQuery] = "localhost"
+	f.mu.Unlock()
+	if w := m.Maintain(context.Background()); len(w) != 0 || !strings.Contains(f.all(), strings.Join(WindowsProxyBypassAddCmd(st.ProxyBypassAdded), " ")) {
+		t.Fatal(w, f.all())
 	}
 }

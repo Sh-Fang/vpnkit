@@ -204,9 +204,156 @@ func WindowsNRPTAddCmd(servers []netip.Addr, suffixes []string) []string {
 		fmt.Sprintf(`Add-DnsClientNrptRule -Namespace %s -NameServers %s -Comment "%s"`, strings.Join(ns, ","), strings.Join(ss, ","), NRPTComment)}
 }
 
+// NRPTPolicyKey 是组策略 NRPT 键。它存在时（即使为空）Windows 忽略全部本地 NRPT 规则（docs/07 §3.3）。
+const NRPTPolicyKey = `HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig`
+
+// WindowsNRPTPolicyQueryCmd 输出 "absent"，或 "<子键数> <值数>"。
+func WindowsNRPTPolicyQueryCmd() []string {
+	return []string{"powershell", "-NoProfile", "-NonInteractive", "-Command",
+		fmt.Sprintf(`$k='%s'; if (Test-Path -LiteralPath $k) { '{0} {1}' -f @(Get-ChildItem -LiteralPath $k).Count, @((Get-Item -LiteralPath $k).Property).Count } else { 'absent' }`, NRPTPolicyKey)}
+}
+
+// WindowsNRPTPolicyRemoveCmd 只在键为空时删除；执行时再检查一次，避免删掉期间被组策略写入的内容。
+func WindowsNRPTPolicyRemoveCmd() []string {
+	return []string{"powershell", "-NoProfile", "-NonInteractive", "-Command",
+		fmt.Sprintf(`$k='%s'; if (@(Get-ChildItem -LiteralPath $k).Count -eq 0 -and @((Get-Item -LiteralPath $k).Property).Count -eq 0) { Remove-Item -LiteralPath $k } else { exit 3 }`, NRPTPolicyKey)}
+}
+
+// WindowsNRPTPolicyRestoreCmd 重建空键；已存在时不动（New-Item -Force 会清空已有键）。
+func WindowsNRPTPolicyRestoreCmd() []string {
+	return []string{"powershell", "-NoProfile", "-NonInteractive", "-Command",
+		fmt.Sprintf(`$k='%s'; if (-not (Test-Path -LiteralPath $k)) { New-Item -Path $k | Out-Null }`, NRPTPolicyKey)}
+}
+
+// ParseNRPTPolicy 解析 WindowsNRPTPolicyQueryCmd 的输出。
+func ParseNRPTPolicy(out string) (exists, empty bool, err error) {
+	f := strings.Fields(out)
+	if len(f) == 1 && f[0] == "absent" {
+		return false, false, nil
+	}
+	if len(f) != 2 {
+		return false, false, fmt.Errorf("无法解析组策略 NRPT 键查询结果 %q", strings.TrimSpace(out))
+	}
+	return true, f[0] == "0" && f[1] == "0", nil
+}
+
 func WindowsNRPTDelCmd() []string {
 	return []string{"powershell", "-NoProfile", "-NonInteractive", "-Command",
 		fmt.Sprintf(`Get-DnsClientNrptRule | Where-Object {$_.Comment -eq "%s"} | Remove-DnsClientNrptRule -Force`, NRPTComment)}
+}
+
+// ProxySettingsKey 是当前用户的系统代理设置；Clash 等工具开"系统代理"时写的就是这里。
+const ProxySettingsKey = `HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings`
+
+// proxyNotify 通知 WinINet 设置已变（INTERNET_OPTION_SETTINGS_CHANGED=39、REFRESH=37），浏览器据此重读代理例外。
+const proxyNotify = `Add-Type -Namespace vpnkit -Name WinINet -MemberDefinition '[DllImport("wininet.dll")] public static extern bool InternetSetOption(System.IntPtr h, int o, System.IntPtr b, int l);'; [void][vpnkit.WinINet]::InternetSetOption([IntPtr]::Zero, 39, [IntPtr]::Zero, 0); [void][vpnkit.WinINet]::InternetSetOption([IntPtr]::Zero, 37, [IntPtr]::Zero, 0)`
+
+const proxyCurrent = `$cur=@(((Get-ItemProperty -LiteralPath $k -Name ProxyOverride -ErrorAction SilentlyContinue).ProxyOverride -split ';') | Where-Object { $_ })`
+
+// WindowsProxyBypassQueryCmd 输出系统代理例外列表（ProxyOverride，分号分隔）。
+func WindowsProxyBypassQueryCmd() []string {
+	return []string{"powershell", "-NoProfile", "-NonInteractive", "-Command",
+		fmt.Sprintf(`$k='%s'; (Get-ItemProperty -LiteralPath $k -Name ProxyOverride -ErrorAction SilentlyContinue).ProxyOverride`, ProxySettingsKey)}
+}
+
+// WindowsProxyBypassAddCmd 把 entries 中尚未存在的条目追加到系统代理例外末尾。
+func WindowsProxyBypassAddCmd(entries []string) []string {
+	return []string{"powershell", "-NoProfile", "-NonInteractive", "-Command",
+		fmt.Sprintf(`$k='%s'; $add=@(%s); %s; $new=$cur + @($add | Where-Object { $cur -notcontains $_ }); Set-ItemProperty -LiteralPath $k -Name ProxyOverride -Value ($new -join ';'); %s`,
+			ProxySettingsKey, psList(entries), proxyCurrent, proxyNotify)}
+}
+
+// WindowsProxyBypassDelCmd 只删除 entries 中的条目，其余例外保持原样。
+func WindowsProxyBypassDelCmd(entries []string) []string {
+	return []string{"powershell", "-NoProfile", "-NonInteractive", "-Command",
+		fmt.Sprintf(`$k='%s'; $del=@(%s); %s; $new=@($cur | Where-Object { $del -notcontains $_ }); Set-ItemProperty -LiteralPath $k -Name ProxyOverride -Value ($new -join ';'); %s`,
+			ProxySettingsKey, psList(entries), proxyCurrent, proxyNotify)}
+}
+
+func psList(ss []string) string {
+	q := make([]string, len(ss))
+	for i, s := range ss {
+		q[i] = "'" + strings.ReplaceAll(s, "'", "''") + "'"
+	}
+	return strings.Join(q, ",")
+}
+
+// ParseProxyBypass 解析 WindowsProxyBypassQueryCmd 的输出。
+func ParseProxyBypass(out string) []string {
+	var r []string
+	for _, e := range strings.Split(strings.TrimSpace(out), ";") {
+		if e = strings.TrimSpace(e); e != "" {
+			r = append(r, e)
+		}
+	}
+	return r
+}
+
+// maxBypassExpand 是非整字节网段展开成通配条目的上限；超过时退到更粗的一级。
+const maxBypassExpand = 16
+
+// ProxyBypassEntries 把内网网段与域名后缀换成系统代理例外条目。
+// WinINet 例外只认通配符，不认 CIDR，所以网段按整字节边界写成 "10.*"、"172.16.*"。
+func ProxyBypassEntries(routes []netip.Prefix, suffixes []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(e string) {
+		if !seen[e] {
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
+	for _, r := range routes {
+		if !r.Addr().Is4() {
+			continue
+		}
+		r = r.Masked()
+		bits := r.Bits() / 8 * 8
+		if bits < r.Bits() && 1<<(bits+8-r.Bits()) <= maxBypassExpand {
+			bits += 8
+		}
+		if bits == 0 {
+			continue
+		}
+		base := r.Addr().As4()
+		n := 1
+		if bits > r.Bits() {
+			n = 1 << (bits - r.Bits())
+		}
+		for i := 0; i < n; i++ {
+			o := base
+			o[bits/8-1] += byte(i)
+			parts := make([]string, bits/8)
+			for j := range parts {
+				parts[j] = fmt.Sprint(o[j])
+			}
+			e := strings.Join(parts, ".")
+			if bits < 32 {
+				e += ".*"
+			}
+			add(e)
+		}
+	}
+	for _, s := range suffixes {
+		if !validBypassHost(s) {
+			continue
+		}
+		add(s)
+		add("*." + s)
+	}
+	return out
+}
+
+func validBypassHost(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // ResolverFile 返回 macOS /etc/resolver/<suffix> 的路径与内容。首行标记归属，清理时据此判断。

@@ -21,6 +21,10 @@ type State struct {
 	DNSFiles       []string  `json:"dns_files"`
 	ResolvectlLink string    `json:"resolvectl_link,omitempty"`
 	NRPTAdded      []string  `json:"nrpt_added"`
+	// NRPTPolicyKeyRemoved 表示 up 删除过空的组策略 NRPT 键，清理时要重建。
+	NRPTPolicyKeyRemoved bool `json:"nrpt_policy_key_removed,omitempty"`
+	// ProxyBypassAdded 是 vpnkit 追加到系统代理例外里的条目；清理时只删这些。
+	ProxyBypassAdded []string `json:"proxy_bypass_added,omitempty"`
 }
 
 func StatePath(dir string) string { return filepath.Join(dir, "state.json") }

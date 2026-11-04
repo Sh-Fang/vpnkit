@@ -59,6 +59,14 @@ type Network interface {
 	Teardown(ctx context.Context) error
 }
 
+// maintainer 是 Network 的可选能力：运行期间周期检查被外部改动的网络配置并修复。
+type maintainer interface {
+	Maintain(ctx context.Context) []string
+}
+
+// maintainInterval 是 maintainer 的检查周期。
+var maintainInterval = 30 * time.Second
+
 // TunnelParams 是隧道相关配置（来自 config.Tunnel）。
 type TunnelParams struct {
 	MTU               int
@@ -847,6 +855,25 @@ func (s *Session) runConn(ctx context.Context, ctl *tunnel.Control, up, down net
 						}
 					} else {
 						fails = 0
+					}
+				}
+			}
+		}()
+	}
+
+	if m, ok := s.o.Network.(maintainer); ok {
+		wg.Add(1)
+		go func() { // 网络配置巡检
+			defer wg.Done()
+			tk := time.NewTicker(maintainInterval)
+			defer tk.Stop()
+			for {
+				select {
+				case <-cctx.Done():
+					return
+				case <-tk.C:
+					for _, w := range m.Maintain(cctx) {
+						s.warn(w)
 					}
 				}
 			}
