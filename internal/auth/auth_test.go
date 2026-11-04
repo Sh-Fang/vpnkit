@@ -308,6 +308,21 @@ func TestCertSHA256Pinning(t *testing.T) {
 	}
 }
 
+func TestLoginHIDEchoCSRF(t *testing.T) {
+	// 显式开启回显时才带上 svpn_req_randcode（auth.hid_echo_csrf）。
+	as, c := newGateway(t, testserver.AuthConfig{NextAuth: "4", NextService: "auth/hid", HIDExpectDevID: testDevID},
+		func(o *Options) { o.RegisterDevice = true; o.EchoHIDCSRF = true })
+	if _, err := c.Login(context.Background(), LoginRequest{
+		User: "alice", Password: "s3cret", DeviceID: testDevID,
+		MACAddress: "AA:BB:CC:DD:EE:01", Hostname: "test-host",
+	}); err != nil {
+		t.Fatalf("hid login: %v", err)
+	}
+	if got := as.LastHIDForm().Get("svpn_req_randcode"); got == "" {
+		t.Error("开启回显时应带上 CSRF")
+	}
+}
+
 func TestLoginKeepsTwfIDOnSuccessCode(t *testing.T) {
 	as, c := newGateway(t, testserver.AuthConfig{KeepTwfID: true})
 	tok, err := c.Login(context.Background(), LoginRequest{User: "alice", Password: "s3cret"})
@@ -360,9 +375,12 @@ func TestLoginHIDRegisterSuccess(t *testing.T) {
 	if got := f.Get("ignore"); got != "0" {
 		t.Errorf("ignore = %q，期望 0", got)
 	}
-	// 反重放：回显 login_psw 那步拿到的 CSRF。
-	if f.Get("svpn_req_randcode") == "" {
-		t.Errorf("hid 表单应带 CSRF: %v", f)
+	// 官方 SDK 的 loginHid 只发这四个字段，多带 CSRF 是偏离，默认不带上（docs/02 §4.1）。
+	if got := f.Get("svpn_req_randcode"); got != "" {
+		t.Errorf("默认不该回显 CSRF，实得 %q: %v", got, f)
+	}
+	if len(f) != 4 {
+		t.Errorf("表单只应有四个字段，实得 %v", f)
 	}
 	// 已绑定的机器不需要再提交绑定申请。
 	if got := as.LastSubmitHID(); got != nil {

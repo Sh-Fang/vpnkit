@@ -79,6 +79,9 @@ type Options struct {
 	HIDField       string // 特征码表单字段名
 	// 提交设备绑定申请（进管理员审批队列）的端点，参数走查询串（docs/02 §4.3）。
 	SubmitHIDEndpoint string
+	// EchoHIDCSRF 为 true 时在特征码表单里回显 CSRF（svpn_req_randcode）。
+	// 官方 SDK 的 loginHid 只发四个字段，多带一个是偏离，默认关闭（docs/02 §4.1）。
+	EchoHIDCSRF bool
 	// 特征码页端点，只在诊断时只读 GET（docs/02 §4.1）。
 	HardIDEndpoint string
 	HIDLanguage    string
@@ -377,7 +380,7 @@ func (c *Client) submitHID(ctx context.Context, token, csrf string, req LoginReq
 			break
 		}
 		fresh := res.fields["CSRF_RAND_CODE"]
-		if attempt >= 1 || fresh == "" || fresh == csrf {
+		if !c.o.EchoHIDCSRF || attempt >= 1 || fresh == "" || fresh == csrf {
 			break
 		}
 		c.log.Debug("特征码这步被判 param error，带上网关刚发的 CSRF 重试一次")
@@ -451,12 +454,13 @@ func (c *Client) postHID(ctx context.Context, token, csrf string, req LoginReque
 	form.Set("hostname", req.Hostname)
 	form.Set("macaddress", req.MACAddress)
 	form.Set("ignore", "0")
-	if csrf != "" {
+	if c.o.EchoHIDCSRF && csrf != "" {
 		form.Set("svpn_req_randcode", csrf)
 	}
 	logx.Assumption(c.log, "hid_submit", c.hidPath(),
 		"field", c.o.HIDField, "devid", logx.Mask(req.DeviceID),
-		"hostname", req.Hostname, "mac", logx.Mask(req.MACAddress), "csrf_sent", csrf != "")
+		"hostname", req.Hostname, "mac", logx.Mask(req.MACAddress),
+		"csrf_sent", c.o.EchoHIDCSRF && csrf != "")
 	return c.postAuthForm(ctx, c.hidPath(), token, form)
 }
 

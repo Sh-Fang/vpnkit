@@ -104,7 +104,7 @@ POST /por/login_hid.csp?manual_submit=1
 Content-Type: application/x-www-form-urlencoded
 Cookie: TWFID=<第 1 步的令牌>
 
-hid=<32 位大写十六进制>&hostname=<base64 主机名>&macaddress=<aa-bb-cc-dd-ee-ff>&ignore=0&svpn_req_randcode=<CSRF>
+hid=<32 位大写十六进制>&hostname=<base64 主机名>&macaddress=<aa-bb-cc-dd-ee-ff>&ignore=0
 ```
 
 四条硬约束，缺任何一条都会被网关判 `ErrorCode=20210`（`submit param error.`）：
@@ -114,8 +114,11 @@ hid=<32 位大写十六进制>&hostname=<base64 主机名>&macaddress=<aa-bb-cc-
 3. 字段名就是 `hid`，不是 `svpn_inputhid` 之类按 `auth/sms`→`svpn_inputsms` 规律外推的名字。
 4. 参数只放表单体。拼进 URL 查询串会被网关按未知路径处理，直接 404。
 
-**反重放握手**：网关判 `20210` 时会在响应里回一个新的 `CSRF_RAND_CODE`，这是"带上新值再试一次"的信号，
-因此实现携带 `svpn_req_randcode`，并在被判 `20210` 时用响应里的新 CSRF 重试**一次**（不无限重试）。
+**不要多带字段**：官方 SDK 的 `loginHid` 发出去的表单就是上面四个字段，没有 `svpn_req_randcode`。
+网关判 `20210` 时虽然会回一个新的 `CSRF_RAND_CODE`，但那只是常规轮换，不是"带上再试一次"的信号——
+多带一个字段本身就是形状偏离。因此默认严格照 SDK 发四个字段；确实需要回显时用
+`auth.hid_echo_csrf = true` 显式打开，打开后才允许在 `20210` 时用新 CSRF 重试一次。
+
 三段的取值全部照官方 SDK 的形式（`docs/06` §3）：`hostname` 是**标准 base64** 的主机名，
 `macaddress` 是**小写连字符**的 `aa-bb-cc-dd-ee-ff`。两者是给管理员审批时看的元数据，
 网关真正比对的是 `hid`；但形状不对一样会被判 `20210`。

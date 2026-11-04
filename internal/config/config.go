@@ -44,6 +44,7 @@ type Auth struct {
 	HIDQuery       string `toml:"hid_query"`       // 上面这个端点固定的查询串，默认 manual_submit=1
 	HIDField       string `toml:"hid_field"`       // 特征码表单字段名，默认 hid
 	HIDLanguage    string `toml:"hid_language"`    // 绑定申请里的 language 参数，默认 zh_CN
+	HIDEchoCSRF    bool   `toml:"hid_echo_csrf"`   // 特征码表单是否回显 CSRF，默认 false（官方 SDK 不发）
 	// 提交设备绑定申请（进管理员审批队列）的端点，参数走查询串。
 	SubmitHIDEndpoint string `toml:"submithid_endpoint"` // 默认 /por/submithid.csp
 	// 特征码页端点，仅在诊断时只读 GET，用来核对网关要求的字段（docs/02 §4.1）。
