@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Sh-Fang/vpnkit/internal/auth"
+	"github.com/Sh-Fang/vpnkit/internal/devid"
 	"github.com/Sh-Fang/vpnkit/internal/fsutil"
 	"github.com/Sh-Fang/vpnkit/testserver"
 )
@@ -133,4 +134,41 @@ func TestHoistCommand(t *testing.T) {
 	if got != "up --config x.toml --verbose --dry-run" {
 		t.Fatal(got)
 	}
+}
+
+// TestLoginRegisterDevicePinsDevID 验证：开启设备提交并走完特征码这步后，特征码立刻被固化。
+// 不固化的话，网卡列表一变（换 Wi-Fi、起 docker）算出来的值就变，网关又当成新设备重新要审批。
+func TestLoginRegisterDevicePinsDevID(t *testing.T) {
+	home := isolate(t)
+	// 假网关要求 hid 这步，且认这一个特征码。
+	as, _ := testserver.NewAuthServer(testserver.AuthConfig{
+		Users:          map[string]string{"alice": "pw-1"},
+		NextAuth:       "4",
+		NextService:    "auth/hid",
+		HIDExpectDevID: currentDeviceID(t),
+	})
+	addr, ca := gateway(t, as)
+	t.Setenv("VPNKIT_PASSWORD", "pw-1")
+
+	if code, out, errOut := runCLI(t, "login", "--server", addr, "--ca-file", ca, "--user", "alice", "--register-device"); code != 0 {
+		t.Fatalf("login exit %d: %s %s", code, out, errOut)
+	}
+	id, err := os.ReadFile(filepath.Join(home, "device-id"))
+	if err != nil {
+		t.Fatalf("特征码未固化: %v", err)
+	}
+	if got := strings.TrimSpace(string(id)); got != currentDeviceID(t) {
+		t.Errorf("固化值 = %q，期望 %q", got, currentDeviceID(t))
+	}
+}
+
+// currentDeviceID 返回本机当前算出的特征码（测试机固定，故可直接当期望值用）。
+func currentDeviceID(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	id, _, err := devid.Get(home, devid.SystemSource{})
+	if err != nil {
+		t.Skipf("本机取不到特征码要素: %v", err)
+	}
+	return id
 }

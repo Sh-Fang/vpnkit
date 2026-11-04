@@ -154,6 +154,15 @@ func cmdLogin(a *app, args []string) error {
 	if err != nil {
 		return err
 	}
+	// 这步登录已经让网关认下这个特征码，立刻固化它：否则网卡列表一变（换 Wi-Fi、插网线、
+	// 起 docker），下次算出来的值就变了，网关又当成新设备，重新要一遍审批（docs/06 §5）。
+	if a.cfg.Auth.RegisterDevice && devID != "" {
+		if err := pinDeviceID(a, devID); err != nil {
+			a.log.Warn("固化设备标识失败，下次网络变化可能被网关当成新设备", "err", err)
+		} else {
+			a.log.Info("已固化设备标识", "devid", logx.Mask(devID))
+		}
+	}
 	sess := &auth.Session{
 		Server: a.cfg.Server.Host, Port: a.cfg.Server.Port, User: a.cfg.Auth.User,
 		TwfID: tok, ObtainedAt: time.Now().UTC(), ExpiresHint: 3600,
@@ -256,3 +265,6 @@ var deviceID = func(*app) (string, error) {
 
 // hidExtras 取 auth/hid 登记要连同特征码上报的本机 MAC 与主机名；由 devid 子命令接入。
 var hidExtras = func(*app) (mac, host string) { return "", "" }
+
+// pinDeviceID 把本次登录用的特征码固化下来；由 devid 子命令接入。
+var pinDeviceID = func(*app, string) error { return errors.New("设备标识模块未接入") }

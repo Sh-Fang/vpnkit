@@ -17,6 +17,15 @@ func init() {
 		id, _, err := devid.Get(a.dir, devid.SystemSource{})
 		return id, err
 	}
+	pinDeviceID = func(a *app, id string) error {
+		if cur, cached, err := devid.Get(a.dir, devid.SystemSource{}); err == nil && cached && cur == id {
+			return nil // 已是同一个值，不重复写盘
+		}
+		if _, err := fsutil.EnsureDir(); err != nil {
+			return err
+		}
+		return devid.Pin(a.dir, id)
+	}
 	hidExtras = func(a *app) (string, string) {
 		mac, _ := devid.PrimaryMAC(devid.SystemSource{})
 		host, _ := os.Hostname()

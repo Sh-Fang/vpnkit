@@ -142,8 +142,12 @@ POST /por/submithid.csp?type=cs&language=zh_CN&hid=<特征码>&hostname=<主机�
 自动提交会把机器登记进网关的设备绑定队列，属于有副作用的操作，因此**默认关闭**：
 命中二次认证且未开启时，报 `ErrSecondFactor` 并提示加 `--register-device`（配置项 `auth.register_device`）。
 
-开启后每次登录都会带上本机特征码，因此**必须先固化**（`devid pin`，见 `docs/06` §5）：
-否则换 Wi-Fi / 插拔网卡会让指纹变化，网关每次都当成新设备，重新要求审批。
+开启后每次登录都会带上本机特征码。特征码由网卡列表等要素现算，**要素一变值就变**——
+换 Wi-Fi、插网线、起 docker 都会让网关把本机当成新设备，于是又要求审批一次。
+
+因此实现了自动固化：`--register-device` 登录成功后，立即把本次用的特征码写入 `device-id`
+（`docs/06` §5），之后一律用它。这样同一台机器只审批一次；换机器时删掉该文件或
+`vpnkit devid pin` 重新固化即可。
 
 ### 4.4 取证日志
 
