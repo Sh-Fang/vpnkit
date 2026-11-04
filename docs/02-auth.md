@@ -89,36 +89,73 @@ send_rand_code = false       # 未启用图形验证码时
 成功响应若带 `NextAuth` 且不是 `-1`，说明网关还要二次认证（短信、令牌、设备登记等），当前版本报 `ErrSecondFactor`，
 退出码 3。`NextAuth`、`NextService` 的值记入 `assumption=login_next_auth`。
 
-实测深信服 M7.6.8R2 对启用设备绑定的账号返回 `NextAuth=4 NextService=auth/hid`（hid = 硬件标识登记，
+实测该网关固件 M7.6.8R2 对启用设备绑定的账号返回 `NextAuth=4 NextService=auth/hid`（hid = 硬件标识登记，
 对应 SDK 枚举 `SFAuthTypeHardId=4`）。实测该步响应 `CurAuth=1 IsFirstAuth=1`，`NextServiceSubType`/
 `ChallengeMsg`/`AuthInfo` 为空、另带一个新的 `CSRF_RAND_CODE`——即纯特征码提交、无短信/令牌式交互。
 
-**auth/hid 的提交线格式无处可查**（所有开源重实现只做了密码/短信/令牌，官方封在 native 层）。因此命中二次认证时：
+### 4.1 特征码二次认证（`NextAuth=4`）
 
-- 先把响应体里出现的全部 XML 标签名（**只记名字、不记值**）记入 `assumption=hid_response_tags`，
-  再把 `CurAuth`/`NextServiceSubType`/`ChallengeMsg`/`AuthInfo`/`IsFirstAuth` 等描述性字段记入 `assumption=hid_probe`。
-- 默认不自动提交（避免普通登录静默把机器登记进网关的设备绑定队列），报 `ErrSecondFactor` 并提示加 `--register-device`。
-- 开启 `auth.register_device`（或 `--register-device`）后提交本机特征码。**实测端点确为 `/por/login_hid.csp`**
-  （GET/POST 均 200），每次提交前先只读 GET 取这一步自己的 `CSRF_RAND_CODE`（`assumption=hid_get`），POST 必须
-  回显该 CSRF（用 login_psw 那步的旧 CSRF 会被拒）。
-- **字段名仍待定**：按命名规律 `svpn_input<service>`（`auth/sms`→`svpn_inputsms`、`auth/token`→`svpn_inputtoken`）
-  推断 `auth/hid`→`svpn_inputhid`。网关对字段名不符返回 `ErrorCode=20210`（"submit param error."），因此实现为
-  **候选轮询**：先用 `auth.hid_field`（默认 `svpn_inputhid`），被判 20210 就按 `svpn_hid`/`svpn_hardid`/`hid`/`hardid`
-  依次换、每次重取 CSRF，命中非 20210 即停。一次运行内定位真实字段，避免反复联调。
-  实测带 `?apiversion=1` 后 GET/POST 仍一律回 20210（连空 GET 也回），故同时按官方模板变量 `hid`/`macaddress`/`hostname`
-  并列的提示，提交时附带本机 `macaddress`（主物理网卡 MAC，大写冒号分隔）与 `hostname`——网关可能要三者齐备才收。
-  MAC 格式与是否必需均为假设点，联调据真实协议回填。
-- 每次尝试记 `assumption=hid_submit`（字段名 + 特征码掩码）与 `assumption=hid_result`（字段名 + 标签名 + 返回码 +
-  可读消息，令牌只记有无）。成功且无后续 NextAuth 即放行（有新 `TwfID` 用之，否则沿用原令牌）；非 param-error 的失败
-  多为进管理员审批队列，报 `ErrDevicePending` 并透传网关消息。联调确认真实字段/返回码后回填默认值。
+这一步是一次**纯特征码挑战**：网关拿你在册的硬件指纹和提交值比对，不涉及短信验证码、令牌或交互。
 
-设备标识由 `internal/devid` 计算，登记成功后应 `devid pin` 固化（`docs/06` §5），这样网络/网卡变化不会让网关把本机当成新设备而要求重新审批。
+**请求**
+
+```
+POST /por/login_hid.csp?type=cs&language=zh_CN&encrypt=1
+Content-Type: application/x-www-form-urlencoded
+Cookie: TWFID=<第 1 步的令牌>
+
+hid=<32 位大写十六进制>
+```
+
+三条硬约束，违反任何一条都会被网关判 `ErrorCode=20210`（`submit param error.`）：
+
+1. **表单字段名就是 `hid`**，不是 `svpn_inputhid` 之类按 `auth/sms`→`svpn_inputsms` 规律外推的名字。
+2. **参数只能放表单体**。把同样的参数拼进 URL 查询串会得到 404（网关按未知路径处理）。
+3. **这步不回显 CSRF**。`login_psw` 那步的 CSRF 在这里没有意义，带上反而可能被拒。
+
+`type` / `language` / `encrypt` 三个公共参数挂在查询串上，是该协议族所有认证端点的统一约定
+（`language` 只影响网关返回的可读消息语种，默认 `zh_CN`）。
+
+**响应**
+
+- 成功：`<Result>1</Result>` 或 `<ErrorCode>1</ErrorCode>`，可能换发新 `TwfID`，也可能沿用原令牌。
+- 还要求继续认证：带 `<NextAuth>`；本实现报 `ErrSecondFactor`，退出码 3。
+- `20210`：提交内容不被接受——先检查 `auth.hid_field`（默认 `hid`）与特征码格式（必须是 32 位大写十六进制）。
+
+### 4.2 认证不过 = 设备没绑定
+
+`login_hid.csp` 只负责**认证**，不负责**登记**。机器没在网关侧绑定过时，这一步必然失败——
+此时网关会另有一个绑定申请端点，把机器送进管理员的审批队列：
+
+```
+POST /por/submithid.csp?type=cs&language=zh_CN&hid=<特征码>&hostname=<主机名>&macaddress=<MAC>&rnd=<毫秒计数值>
+```
+
+注意这组参数**全部走查询串**，没有表单体——和 `login_hid.csp` 正好相反，两者不能混用。
+`macaddress` 是大写冒号分隔的 `AA:BB:CC:DD:EE:FF`，`rnd` 只是毫秒计数值，没有校验含义。
+
+因此实现分两段：先 `login_hid.csp` 认证；失败且非 `20210` 时，若开启了设备提交，再发一次绑定申请，
+把网关消息透传给用户并报 `ErrDevicePending`（退出码 3），提示等待管理员审批。
+
+### 4.3 默认不提交
+
+自动提交会把机器登记进网关的设备绑定队列，属于有副作用的操作，因此**默认关闭**：
+命中二次认证且未开启时，报 `ErrSecondFactor` 并提示加 `--register-device`（配置项 `auth.register_device`）。
+
+开启后每次登录都会带上本机特征码，因此**必须先固化**（`devid pin`，见 `docs/06` §5）：
+否则换 Wi-Fi / 插拔网卡会让指纹变化，网关每次都当成新设备，重新要求审批。
+
+### 4.4 取证日志
+
+- `assumption=hid_submit`：端点 + 字段名 + 特征码掩码
+- `assumption=hid_result`：返回码、`NextAuth`、可读消息、是否换发令牌
+- `assumption=hid_register`：绑定申请端点的参数名与掩码后的取值（完整 URL 含明文特征码，不入日志）
 
 图形验证码：`RndImg=1` 时当前版本直接报错（退出码 3），暂不支持拉取验证码图片；`--captcha` 仅用于已知验证码的场景。
 
 证书：网关多为自签证书。默认**校验**证书；用 `server.ca_file`（或 `--ca-file`）信任指定 CA，
 确认网络可信时才用 `server.insecure = true`（或 `--insecure`），后者会打 warn。
-深信服出厂证书自签且只有 `CN=sslvpn`、不带 SAN，与网关域名对不上，`ca_file` 也校验不过；此时用
+出厂证书自签且只有 `CN=sslvpn`、不带 SAN，与网关域名对不上，`ca_file` 也校验不过；此时用
 `server.cert_sha256`（或 `--cert-sha256`）只信任这一张叶子证书，指纹不符报 `ErrCertMismatch` 并给出实际指纹。
 指纹可用 `openssl s_client -connect <host>:443 | openssl x509 -noout -fingerprint -sha256` 获取。
 

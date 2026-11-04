@@ -20,9 +20,12 @@ mitm_field     = "mitm_result"   # 或 "mitm"
 send_rand_code = false
 send_device_id = "auto"         # auto | always | never；auto 看上次登录缓存的 Other.isHidUser
 device_id_field = "devid"       # 设备标识表单字段名，待实测，docs/06 §6
-register_device = false         # true 时网关要 auth/hid 二次认证会提交本机特征码完成登记（docs/02 §4）
-hid_endpoint   = "/por/login_hid.csp"  # auth/hid 提交端点，线格式待联调，按命名规律设默认值
-hid_field      = "svpn_inputhid"  # 特征码提交字段名，待实测
+register_device = false         # true 时网关要 auth/hid 二次认证会提交本机特征码（docs/02 §4）
+hid_endpoint   = "/por/login_hid.csp"  # 特征码认证端点，表单体只放特征码
+hid_query      = "type=cs&language=zh_CN&encrypt=1"  # 该端点固定的查询串
+hid_field      = "hid"          # 特征码表单字段名
+hid_language   = "zh_CN"        # 绑定申请里的 language 参数
+submithid_endpoint = "/por/submithid.csp"  # 设备绑定申请端点，参数走查询串（docs/02 §4.2）
 
 [tunnel]
 mtu                = 1400

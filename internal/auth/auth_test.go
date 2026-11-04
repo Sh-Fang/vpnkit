@@ -333,7 +333,8 @@ func TestLoginSecondFactorRequired(t *testing.T) {
 const testDevID = "3F2A9C14B7E08D5612AB44CD990E7F31"
 
 func TestLoginHIDRegisterSuccess(t *testing.T) {
-	as, c := newGateway(t, testserver.AuthConfig{NextAuth: "4", NextService: "auth/hid"},
+	// 已绑定的机器：login_hid.csp 收到 hid=<特征码> 即完成二次认证（docs/02 §4）。
+	as, c := newGateway(t, testserver.AuthConfig{NextAuth: "4", NextService: "auth/hid", HIDExpectDevID: testDevID},
 		func(o *Options) { o.RegisterDevice = true })
 	tok, err := c.Login(context.Background(), LoginRequest{User: "alice", Password: "s3cret", DeviceID: testDevID})
 	if err != nil {
@@ -343,27 +344,32 @@ func TestLoginHIDRegisterSuccess(t *testing.T) {
 		t.Fatalf("token %q not registered after hid", tok)
 	}
 	f := as.LastHIDForm()
-	if f.Get("svpn_inputhid") != testDevID {
-		t.Errorf("hid form 未带特征码: %v", f)
+	if f.Get("hid") != testDevID {
+		t.Errorf("hid 表单未带特征码: %v", f)
 	}
-	if f.Get("svpn_req_randcode") == "" {
-		t.Errorf("hid form 未带 CSRF: %v", f)
+	// 这步不需要 CSRF，也不该带 MAC/主机名——那是绑定申请的参数。
+	if f.Get("svpn_req_randcode") != "" {
+		t.Errorf("hid 表单不该带 CSRF: %v", f)
+	}
+	if f.Get("macaddress") != "" || f.Get("hostname") != "" {
+		t.Errorf("hid 表单不该带 mac/hostname: %v", f)
+	}
+	// 已绑定的机器不需要再提交绑定申请。
+	if got := as.LastSubmitHID(); got != nil {
+		t.Errorf("不该提交绑定申请: %v", got)
 	}
 }
 
-func TestLoginHIDFieldSweep(t *testing.T) {
-	// 网关只认第二候选 svpn_hid：客户端首发 svpn_inputhid 被拒 param error 后应自动换候选成功。
-	as, c := newGateway(t, testserver.AuthConfig{NextAuth: "4", NextService: "auth/hid", HIDField: "svpn_hid"},
+func TestLoginHIDParamError(t *testing.T) {
+	// 网关要求的字段名与默认值不同 → 20210；错误要能指向 hid_field 配置项。
+	_, c := newGateway(t, testserver.AuthConfig{NextAuth: "4", NextService: "auth/hid", HIDField: "svpn_inputhid"},
 		func(o *Options) { o.RegisterDevice = true })
-	tok, err := c.Login(context.Background(), LoginRequest{User: "alice", Password: "s3cret", DeviceID: testDevID})
-	if err != nil {
-		t.Fatalf("hid sweep login: %v", err)
+	_, err := c.Login(context.Background(), LoginRequest{User: "alice", Password: "s3cret", DeviceID: testDevID})
+	if !errors.Is(err, ErrDevicePending) {
+		t.Fatalf("got %v", err)
 	}
-	if !as.ValidToken(tok) {
-		t.Fatalf("token %q not registered", tok)
-	}
-	if as.LastHIDForm().Get("svpn_hid") != testDevID {
-		t.Errorf("未用正确候选字段提交: %v", as.LastHIDForm())
+	if !strings.Contains(err.Error(), "hid_field") {
+		t.Errorf("错误应指向 hid_field 配置项: %v", err)
 	}
 }
 
@@ -386,11 +392,30 @@ func TestLoginHIDNeedsDeviceID(t *testing.T) {
 }
 
 func TestLoginHIDPendingApproval(t *testing.T) {
-	// 网关期望另一台机器的特征码 → 本机未登记 → 进审批队列。
-	_, c := newGateway(t, testserver.AuthConfig{NextAuth: "4", NextService: "auth/hid", HIDExpectDevID: "00000000000000000000000000000000"},
+	// 网关期望另一台机器 → login_hid 认证不过 → 改走 submithid.csp 提交绑定申请 → 停在待审批。
+	as, c := newGateway(t, testserver.AuthConfig{NextAuth: "4", NextService: "auth/hid", HIDExpectDevID: "00000000000000000000000000000000"},
 		func(o *Options) { o.RegisterDevice = true })
-	_, err := c.Login(context.Background(), LoginRequest{User: "alice", Password: "s3cret", DeviceID: testDevID})
+	_, err := c.Login(context.Background(), LoginRequest{
+		User: "alice", Password: "s3cret", DeviceID: testDevID,
+		MACAddress: "AA:BB:CC:DD:EE:01", Hostname: "test-host",
+	})
 	if !errors.Is(err, ErrDevicePending) {
 		t.Fatalf("got %v", err)
+	}
+	q := as.LastSubmitHID()
+	if q == nil {
+		t.Fatal("未提交绑定申请")
+	}
+	// 绑定申请的参数全在查询串上，形状取自官方客户端（docs/02 §4.3）。
+	for _, k := range []string{"type", "language", "hid", "hostname", "macaddress", "rnd"} {
+		if q.Get(k) == "" {
+			t.Errorf("绑定申请缺参数 %s: %v", k, q)
+		}
+	}
+	if q.Get("hid") != testDevID {
+		t.Errorf("绑定申请的特征码不对: %v", q)
+	}
+	if q.Get("hostname") != "test-host" || q.Get("macaddress") != "AA:BB:CC:DD:EE:01" {
+		t.Errorf("绑定申请没带上主机名/MAC: %v", q)
 	}
 }

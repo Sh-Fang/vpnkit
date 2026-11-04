@@ -69,20 +69,22 @@ func (s *serverFlags) apply(a *app) {
 
 func (a *app) authClient() (*auth.Client, error) {
 	return auth.New(auth.Options{
-		Server:         a.cfg.Server.Host,
-		Port:           a.cfg.Server.Port,
-		Insecure:       a.cfg.Server.Insecure,
-		CAFile:         a.cfg.Server.CAFile,
-		CertSHA256:     a.cfg.Server.CertSHA256,
-		Timeout:        a.g.timeout,
-		MitmField:      a.cfg.Auth.MitmField,
-		SendRandCode:   a.cfg.Auth.SendRandCode,
-		DeviceIDField:  a.cfg.Auth.DeviceIDField,
-		RegisterDevice: a.cfg.Auth.RegisterDevice,
-		HIDEndpoint:    a.cfg.Auth.HIDEndpoint,
-		HIDQuery:       a.cfg.Auth.HIDQuery,
-		HIDField:       a.cfg.Auth.HIDField,
-		Logger:         a.log,
+		Server:            a.cfg.Server.Host,
+		Port:              a.cfg.Server.Port,
+		Insecure:          a.cfg.Server.Insecure,
+		CAFile:            a.cfg.Server.CAFile,
+		CertSHA256:        a.cfg.Server.CertSHA256,
+		Timeout:           a.g.timeout,
+		MitmField:         a.cfg.Auth.MitmField,
+		SendRandCode:      a.cfg.Auth.SendRandCode,
+		DeviceIDField:     a.cfg.Auth.DeviceIDField,
+		RegisterDevice:    a.cfg.Auth.RegisterDevice,
+		HIDEndpoint:       a.cfg.Auth.HIDEndpoint,
+		HIDQuery:          a.cfg.Auth.HIDQuery,
+		HIDField:          a.cfg.Auth.HIDField,
+		HIDLanguage:       a.cfg.Auth.HIDLanguage,
+		SubmitHIDEndpoint: a.cfg.Auth.SubmitHIDEndpoint,
+		Logger:            a.log,
 	})
 }
 

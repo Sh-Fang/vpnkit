@@ -23,7 +23,7 @@ type Server struct {
 	Port int    `toml:"port"`
 	Auth string `toml:"auth"`
 	// 网关多为自签证书。默认仍校验证书；用 ca_file 信任指定 CA，
-	// 或显式 insecure=true 跳过（会打 warn）。深信服出厂证书自签且不带 SAN，ca_file 也校验不过，
+	// 或显式 insecure=true 跳过（会打 warn）。这类网关的出厂证书多为自签且不带 SAN，ca_file 也校验不过，
 	// 此时用 cert_sha256 只认这一张证书。
 	Insecure   bool   `toml:"insecure"`
 	CAFile     string `toml:"ca_file"`
@@ -37,12 +37,15 @@ type Auth struct {
 	SendDeviceID string `toml:"send_device_id"` // auto | always | never
 	// 设备标识在登录表单中的字段名。原始资料未给出，属假设点 device_id_field。
 	DeviceIDField string `toml:"device_id_field"`
-	// 网关要求 auth/hid 二次认证（特征码登记）时的提交参数。线格式无处可查，
-	// 按命名规律给默认值，真机联调据网关响应回填（docs/02 §4、docs/06 §6）。
-	RegisterDevice bool   `toml:"register_device"` // true 时自动提交本机特征码完成 hid 登记
-	HIDEndpoint    string `toml:"hid_endpoint"`    // 默认 /por/login_hid.csp
-	HIDQuery       string `toml:"hid_query"`       // hid 请求的 URL 查询串，默认 apiversion=1（对齐 sms 流程）
-	HIDField       string `toml:"hid_field"`       // 特征码字段名，默认 svpn_inputhid
+	// 网关要求 auth/hid 二次认证（特征码）时的提交参数。默认值取自官方客户端的实际请求
+	// （docs/02 §4、docs/06 §6），一般不需要改。
+	RegisterDevice bool   `toml:"register_device"` // true 时自动提交本机特征码
+	HIDEndpoint    string `toml:"hid_endpoint"`    // 认证这步，默认 /por/login_hid.csp
+	HIDQuery       string `toml:"hid_query"`       // 上面这个端点固定的查询串
+	HIDField       string `toml:"hid_field"`       // 特征码表单字段名，默认 hid
+	HIDLanguage    string `toml:"hid_language"`    // 绑定申请里的 language 参数，默认 zh_CN
+	// 提交设备绑定申请（进管理员审批队列）的端点，参数走查询串。
+	SubmitHIDEndpoint string `toml:"submithid_endpoint"` // 默认 /por/submithid.csp
 }
 
 type Tunnel struct {
@@ -97,12 +100,14 @@ func Default() *Config {
 	return &Config{
 		Server: Server{Port: 443, Auth: "password"},
 		Auth: Auth{
-			MitmField:     "mitm_result",
-			SendDeviceID:  "auto",
-			DeviceIDField: "devid",
-			HIDEndpoint:   "/por/login_hid.csp",
-			HIDQuery:      "apiversion=1",
-			HIDField:      "svpn_inputhid",
+			MitmField:         "mitm_result",
+			SendDeviceID:      "auto",
+			DeviceIDField:     "devid",
+			HIDEndpoint:       "/por/login_hid.csp",
+			HIDQuery:          "type=cs&language=zh_CN&encrypt=1",
+			HIDField:          "hid",
+			HIDLanguage:       "zh_CN",
+			SubmitHIDEndpoint: "/por/submithid.csp",
 		},
 		Tunnel: Tunnel{
 			MTU:               1400,

@@ -25,6 +25,9 @@ func main() {
 	certOut := flag.String("cert-out", "testserver-ca.pem", "把自签证书写到此文件，供 vpnkit --ca-file 使用")
 	script := flag.String("script", "happy", "隧道剧本："+strings.Join(testserver.ScriptNames(), "|"))
 	pswDiff := flag.Bool("psw-config-different-key", false, "psw_config 返回不同公钥")
+	nextAuth := flag.String("next-auth", "", "登录后要求二次认证，如 4（特征码）")
+	nextService := flag.String("next-service", "", "随 NextAuth 下发的服务名，如 auth/hid")
+	hidExpect := flag.String("hid-expect", "", "期望的特征码；设置后只有该特征码能通过认证")
 	flag.Parse()
 
 	_, tportS, err := net.SplitHostPort(*tunnelAddr)
@@ -35,6 +38,9 @@ func main() {
 	as, err := testserver.NewAuthServer(testserver.AuthConfig{
 		Users:                 map[string]string{*user: *password},
 		PswConfigDifferentKey: *pswDiff,
+		NextAuth:              *nextAuth,
+		NextService:           *nextService,
+		HIDExpectDevID:        *hidExpect,
 		ConfXML:               testserver.ConfXML(tport),
 		RCList:                testserver.RCListXML(strings.Split(*routes, ";")...),
 	})

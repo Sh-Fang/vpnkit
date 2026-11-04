@@ -27,7 +27,7 @@ type AuthConfig struct {
 	NextAuth string
 	// NextService 非空时随 NextAuth 一起下发；含 "hid" 时进入特征码登记流程（需后续提交 hid）。
 	NextService string
-	// HIDField 是特征码提交字段名，默认 svpn_inputhid；HIDExpectDevID 非空时校验提交的特征码。
+	// HIDField 是特征码提交字段名，默认 hid（与官方客户端一致）；HIDExpectDevID 非空时校验提交的特征码。
 	HIDField       string
 	HIDExpectDevID string
 	Captcha        bool
@@ -50,12 +50,13 @@ type AuthServer struct {
 	cfg        AuthConfig
 	keyA, keyB *rsa.PrivateKey
 
-	mu         sync.Mutex
-	pending    map[string]pending
-	hidPending map[string]hidState // twf → 等待 hid 提交的会话
-	sessions   map[string]string   // token → user
-	lastForm   url.Values
-	lastHID    url.Values
+	mu            sync.Mutex
+	pending       map[string]pending
+	hidPending    map[string]hidState // twf → 等待 hid 提交的会话
+	sessions      map[string]string   // token → user
+	lastForm      url.Values
+	lastHID       url.Values
+	lastSubmitHID url.Values
 }
 
 func NewAuthServer(cfg AuthConfig) (*AuthServer, error) {
@@ -71,7 +72,7 @@ func NewAuthServer(cfg AuthConfig) (*AuthServer, error) {
 		cfg.ConfXML = ConfXML(443)
 	}
 	if cfg.HIDField == "" {
-		cfg.HIDField = "svpn_inputhid"
+		cfg.HIDField = "hid"
 	}
 	return &AuthServer{cfg: cfg, keyA: a, keyB: b, pending: map[string]pending{}, hidPending: map[string]hidState{}, sessions: map[string]string{}}, nil
 }
@@ -141,6 +142,7 @@ func (s *AuthServer) Handler() http.Handler {
 	mux.HandleFunc("/public/psw_config", s.pswConfig)
 	mux.HandleFunc("/por/login_psw.csp", s.loginPsw)
 	mux.HandleFunc("/por/login_hid.csp", s.loginHID)
+	mux.HandleFunc("/por/submithid.csp", s.submitHID)
 	mux.HandleFunc("/por/conf.csp", s.authed(func(w http.ResponseWriter) { fmt.Fprint(w, s.cfg.ConfXML) }))
 	mux.HandleFunc("/por/rclist.csp", s.authed(func(w http.ResponseWriter) { fmt.Fprint(w, s.cfg.RCList) }))
 	return mux
@@ -264,7 +266,11 @@ func (s *AuthServer) loginPsw(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>1</Result><Message>login success</Message><TwfID>%s</TwfID></Auth>`, newID)
 }
 
-// loginHID 模拟特征码登记端点：GET 回一张声明字段的表单，POST 校验特征码与 CSRF 后发会话。
+// loginHID 模拟特征码二次认证端点（docs/02 §4）。
+//
+// 真实网关要求：POST /por/login_hid.csp?type=cs&language=zh_CN&encrypt=1，
+// 表单体只有 hid=<特征码>，不校验 CSRF。字段不对返回 20210；特征码不是已绑定的那台机器
+// 则返回 30005，客户端随后改走 submithid.csp 提交绑定申请。
 func (s *AuthServer) loginHID(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		w.Header().Set("Content-Type", "text/xml")
@@ -291,28 +297,55 @@ func (s *AuthServer) loginHID(w http.ResponseWriter, r *http.Request) {
 		fail("30001", "no hid session")
 		return
 	}
-	// 字段名不对返回 20210 submit param error，且保留待登记会话，让客户端换候选字段再试（镜像真机）。
 	devid := r.PostForm.Get(s.cfg.HIDField)
 	if devid == "" {
+		// 参数不对（字段名或取值）——真实网关就是 20210 submit param error。
 		fail("20210", "submit param error.")
 		return
 	}
-	if r.PostForm.Get("svpn_req_randcode") != st.csrf {
-		fail("20210", "submit param error.")
+	if s.cfg.HIDExpectDevID != "" && devid != s.cfg.HIDExpectDevID {
+		// 未绑定的机器：这步只负责认证，注册要另走 submithid.csp。
+		fail("30005", "device not bound")
 		return
 	}
 	s.mu.Lock()
 	delete(s.hidPending, twf)
-	s.mu.Unlock()
-	if s.cfg.HIDExpectDevID != "" && devid != s.cfg.HIDExpectDevID {
-		// 未登记的机器：进审批队列（非 param error，用别的错误码）。
-		fail("30005", "设备未登记，已提交管理员审批")
-		return
-	}
-	s.mu.Lock()
 	s.sessions[twf] = st.user
 	s.mu.Unlock()
 	fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>1</Result><Message>hid auth success</Message></Auth>`)
+}
+
+// submitHID 模拟设备绑定申请端点（docs/02 §4.3）：参数全在查询串上，没有表单体。
+func (s *AuthServer) submitHID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	s.mu.Lock()
+	s.lastSubmitHID = q
+	s.mu.Unlock()
+	need := []string{"type", "language", "hid", "hostname", "macaddress", "rnd"}
+	for _, k := range need {
+		if q.Get(k) == "" {
+			fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>0</Result><ErrorCode>20210</ErrorCode><Message>submit param error: %s</Message></Auth>`, k)
+			return
+		}
+	}
+	if s.cfg.HIDExpectDevID != "" && q.Get("hid") == s.cfg.HIDExpectDevID {
+		// 已绑定的机器不需要申请，直接放行。
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>1</Result><Message>already bound</Message></Auth>`)
+		return
+	}
+	// 新机器：进管理员审批队列。
+	fmt.Fprint(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>0</Result><ErrorCode>30005</ErrorCode><Message>设备未被管理员授权，已提交审批申请</Message><Note>请联系管理员审批</Note></Auth>`)
+}
+
+// LastSubmitHID 返回最近一次绑定申请的查询参数。
+func (s *AuthServer) LastSubmitHID() url.Values {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastSubmitHID
 }
 
 // LastHIDForm 返回最近一次 hid 提交的表单。

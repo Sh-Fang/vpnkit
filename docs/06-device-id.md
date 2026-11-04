@@ -89,8 +89,13 @@ device_id = upper(hex(md5(plaintext)))
 设备标识可反推硬件信息（MAC 前缀含厂商）。因此：
 
 - 只在登录流程中发送，不做其他用途；是否发送由 `auth.send_device_id` 决定（`docs/09` §3）
+- 绑定申请（`docs/02` §4.2）**默认关闭**：它会把本机登记进网关的设备绑定队列，是有副作用的写操作
 - 登录表单字段名原始资料未给出（TODO(待实测)），取 `auth.device_id_field`，默认 `devid`，发送时打 `assumption=device_id_field`
-- 网关要求 `auth/hid` 二次认证（特征码登记）时另走一次提交，字段名取 `auth.hid_field`（默认 `svpn_inputhid`）、端点取 `auth.hid_endpoint`，并连同本机 `macaddress`（`devid.PrimaryMAC`，大写冒号分隔）与 `hostname`（`os.Hostname`）一起上报（官方模板变量 `hid`/`macaddress`/`hostname` 并列）；均为待实测假设点，见 `docs/02` §4
+- 网关要求 `auth/hid` 二次认证时另走一次提交：`POST auth.hid_endpoint`（默认 `/por/login_hid.csp`），
+  表单字段 `auth.hid_field`（默认 `hid`），只带特征码本身，见 `docs/02` §4.1
+- 若该步认证不过（设备未绑定），再发一次绑定申请：`POST auth.submithid_endpoint`（默认 `/por/submithid.csp`），
+  参数走查询串，除特征码外还带本机 `macaddress`（`devid.PrimaryMAC`，大写冒号分隔）与 `hostname`（`os.Hostname`），
+  见 `docs/02` §4.2。绑定申请会把机器送进管理员审批队列，因此只由 `auth.register_device` 显式开启
 - `auto` 依据**上次登录**缓存在会话文件里的 `Other.isHidUser`：`isHidUser` 来自 `conf.csp`，只有登录之后才拿得到
 - 日志里掩码显示（保留首尾各 4 字符）
 - `status --json` 默认不包含该字段，需显式 `--show-devid`
