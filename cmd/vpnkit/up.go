@@ -111,6 +111,11 @@ func cmdUp(a *app, args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	ctx, releaseStop, err := platform.StopContext(ctx)
+	if err != nil {
+		a.log.Warn("无法创建停止事件，vpnkit down 将强制结束本进程", "err", err)
+	}
+	defer releaseStop()
 	signal.Ignore(syscall.SIGHUP) // 终端断开不应导致掉线（docs/08 §4）
 
 	expired := func(err error) error {

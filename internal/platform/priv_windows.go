@@ -28,9 +28,15 @@ func ProcessAlive(pid int) bool {
 	return code == 259 // STILL_ACTIVE
 }
 
-// Terminate 在 Windows 上无法向其他控制台进程投递 Ctrl+C，只能强制结束；
+// gracefulStopMs 略长于 docs/08 §4 规定的 10 秒清理时限，给 up 自身的超时留出余量。
+const gracefulStopMs = 12_000
+
+// Terminate 先通过停止事件请求 up 正常退出；事件不可用或超时未退出时强制结束，
 // 残留路由与 NRPT 由调用方随后按 state.json 清理。
 func Terminate(pid int) error {
+	if requestStop(pid) == nil && waitExit(pid, gracefulStopMs) {
+		return nil
+	}
 	p, err := os.FindProcess(pid)
 	if err != nil {
 		return err

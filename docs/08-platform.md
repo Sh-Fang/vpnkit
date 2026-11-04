@@ -64,6 +64,9 @@
 | `SIGINT` / `SIGTERM` | 执行 `down` 流程后退出 |
 | `SIGHUP` | 忽略（避免终端断开导致掉线） |
 | Windows 控制台关闭事件 | 同上，用 `SetConsoleCtrlHandler` |
+| Windows 命名事件 `Localpnkit-stop-<pid>` 被置位 | 同 `SIGTERM` |
+
+Windows 无法向另一个控制台进程投递 Ctrl+C，因此 `up` 启动时创建上述命名事件，`down` 打开并置位它，让 `up` 走正常的清理流程。`down` 等待 12 秒（略长于下面的 10 秒清理时限）；事件打不开或超时未退出时才强制结束进程，再按 `state.json` 清理残留。强制结束后 wintun 适配器随进程消失，其上的路由由系统一并删除，清理时检测到设备不存在即跳过这些路由。
 
 **必须**保证 `down` 流程在信号处理里跑到（含回滚）。超时 10 秒后强制退出。
 
