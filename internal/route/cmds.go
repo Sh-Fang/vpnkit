@@ -163,6 +163,16 @@ func BypassAddCmd(goos string, ip netip.Addr, g Gateway) []string {
 	}
 }
 
+// BypassExistsCmd 输出服务端地址已有的 /32 路由条数。只有 Windows 需要：route add 遇到已有路由
+// 仍返回 0，只在本地化的输出里报"对象已存在"，不先查就会把别人的路由记成自己的，down 时误删。
+func BypassExistsCmd(goos string, ip netip.Addr) []string {
+	if goos != "windows" {
+		return nil
+	}
+	return []string{"powershell", "-NoProfile", "-NonInteractive", "-Command",
+		fmt.Sprintf(`@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '%s/32' -ErrorAction SilentlyContinue).Count`, ip)}
+}
+
 func BypassDelCmd(goos string, ip netip.Addr) []string {
 	switch goos {
 	case "darwin":

@@ -28,6 +28,8 @@
 
 若 `--server` 是域名，先解析成 IP，路由用 IP。
 
+服务端地址已有 /32 路由时沿用，不记入 `bypass_added`，`down` 时也不删。Windows 的 `route add` 遇到已有路由仍返回 0，只在本地化输出里报"对象已存在"，所以添加前先用 `Get-NetRoute` 查一次。
+
 ### 2.3 各平台命令
 
 **macOS**

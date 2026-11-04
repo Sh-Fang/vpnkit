@@ -352,6 +352,26 @@ func TestWindowsNRPT(t *testing.T) {
 	}
 }
 
+func TestWindowsExistingBypassRouteUntouched(t *testing.T) {
+	f := newFake()
+	f.query["powershell"] = "12 192.168.1.1"
+	f.query[strings.Join(BypassExistsCmd("windows", netip.MustParseAddr("203.0.113.9")), " ")] = "1"
+	p := plan()
+	p.Device = WindowsAdapter
+	m := &Manager{GOOS: "windows", R: f, Dir: t.TempDir()}
+	if _, err := m.Apply(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(f.all(), "route add 203.0.113.9") {
+		t.Fatal(f.all())
+	}
+	f.cmds = nil
+	m.Teardown(context.Background())
+	if strings.Contains(f.all(), "route delete 203.0.113.9") {
+		t.Fatal(f.all())
+	}
+}
+
 var policyQuery = strings.Join(WindowsNRPTPolicyQueryCmd(), " ")
 
 func windowsManager(t *testing.T, policy string) (*fakeRunner, *Manager, Plan) {

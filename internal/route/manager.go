@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -85,6 +86,11 @@ func (m *Manager) Apply(ctx context.Context, p Plan) (Result, error) {
 			continue
 		}
 		if g.Local || g.Dev == p.Device {
+			continue
+		}
+		if m.bypassExists(ctx, ip) {
+			// 已有明细路由：不覆盖、也不在 down 时删除别人的路由
+			m.log().Info("服务端地址已有明细路由，沿用", "ip", ip)
 			continue
 		}
 		m.st.BypassAdded = append(m.st.BypassAdded, ip.String())
@@ -471,6 +477,20 @@ func Recover(ctx context.Context, dir string, r Runner, log *slog.Logger, alive 
 		return true, fmt.Errorf("清理残留配置未完全成功: %w", errors.Join(errs...))
 	}
 	return true, removeState(dir)
+}
+
+// bypassExists 查询失败时返回 false，退回到直接添加、靠命令报错识别冲突。
+func (m *Manager) bypassExists(ctx context.Context, ip netip.Addr) bool {
+	c := BypassExistsCmd(m.GOOS, ip)
+	if c == nil {
+		return false
+	}
+	out, err := m.R.Query(ctx, c)
+	if err != nil {
+		return false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	return err == nil && n > 0
 }
 
 func alreadyExists(out string, err error) bool {
