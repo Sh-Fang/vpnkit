@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Sh-Fang/vpnkit/internal/auth"
+	"github.com/Sh-Fang/vpnkit/internal/devid"
 	"github.com/Sh-Fang/vpnkit/internal/fsutil"
 	"github.com/Sh-Fang/vpnkit/internal/logx"
 	"github.com/Sh-Fang/vpnkit/internal/platform"
@@ -145,11 +146,11 @@ func cmdLogin(a *app, args []string) error {
 	defer cancel()
 	mac, host := "", ""
 	if a.cfg.Auth.RegisterDevice {
-		mac, host = hidExtras(a)
+		mac, host = devID.MAC, devID.HostName
 	}
 	tok, err := c.Login(ctx, auth.LoginRequest{
 		User: a.cfg.Auth.User, Password: password, Captcha: *captcha,
-		DeviceID: devID, MACAddress: mac, Hostname: host,
+		DeviceID: devID.HID, MACAddress: mac, Hostname: host,
 	})
 	password = ""
 	if err != nil {
@@ -157,11 +158,11 @@ func cmdLogin(a *app, args []string) error {
 	}
 	// 这步登录已经让网关认下这个特征码，立刻固化它：否则网卡列表一变（换 Wi-Fi、插网线、
 	// 起 docker），下次算出来的值就变了，网关又当成新设备，重新要一遍审批（docs/06 §5）。
-	if a.cfg.Auth.RegisterDevice && devID != "" {
+	if a.cfg.Auth.RegisterDevice && devID.HID != "" {
 		if err := pinDeviceID(a, devID); err != nil {
-			a.log.Warn("固化设备标识失败，下次网络变化可能被网关当成新设备", "err", err)
+			a.log.Warn("固化设备特征码失败，下次网络变化可能被网关当成新设备", "err", err)
 		} else {
-			a.log.Info("已固化设备标识", "devid", logx.Mask(devID))
+			a.log.Info("已固化设备特征码", "hid", logx.Mask(devID.HID))
 		}
 	}
 	sess := &auth.Session{
@@ -179,7 +180,7 @@ func cmdLogin(a *app, args []string) error {
 		}
 		logx.Assumption(a.log, "is_hid_user", hid, "present", conf.IsHidUserSet)
 		sess.IsHidUser = &hid
-		if hid == 1 && devID == "" && a.cfg.Auth.SendDeviceID == "auto" {
+		if hid == 1 && devID.HID == "" && a.cfg.Auth.SendDeviceID == "auto" {
 			a.log.Warn("该账号启用了设备绑定，但本次登录未上报设备标识；再执行一次 login 即会上报")
 		}
 	} else {
@@ -232,8 +233,8 @@ func (a *app) resolveSessionServer(flagServer string) (string, error) {
 	return "", fmt.Errorf("%w: 存在多个网关的会话 %v，请用 --server 指定", vpnerr.ErrUsage, list)
 }
 
-// deviceIDForLogin 依据 auth.send_device_id 决定是否上报设备标识（docs/06 §6）。
-func (a *app) deviceIDForLogin(prev *auth.Session) (string, error) {
+// deviceIDForLogin 依据 auth.send_device_id 决定是否上报设备特征码（docs/06 §6）。
+func (a *app) deviceIDForLogin(prev *auth.Session) (devid.HardID, error) {
 	send := false
 	switch a.cfg.Auth.SendDeviceID {
 	case "always":
@@ -246,26 +247,23 @@ func (a *app) deviceIDForLogin(prev *auth.Session) (string, error) {
 		send = true
 	}
 	if !send {
-		return "", nil
+		return devid.HardID{}, nil
 	}
 	id, err := deviceID(a)
 	if err != nil {
 		if a.cfg.Auth.SendDeviceID == "always" {
-			return "", err
+			return devid.HardID{}, err
 		}
-		a.log.Warn("获取设备标识失败，本次不上报", "err", err)
-		return "", nil
+		a.log.Warn("获取设备特征码失败，本次不上报", "err", err)
+		return devid.HardID{}, nil
 	}
 	return id, nil
 }
 
 // deviceID 由 devid 子命令实现；P1 阶段尚未接入时返回明确错误。
-var deviceID = func(*app) (string, error) {
-	return "", errors.New("设备标识模块未接入")
+var deviceID = func(*app) (devid.HardID, error) {
+	return devid.HardID{}, errors.New("设备特征码模块未接入")
 }
 
-// hidExtras 取 auth/hid 登记要连同特征码上报的本机 MAC 与主机名；由 devid 子命令接入。
-var hidExtras = func(*app) (mac, host string) { return "", "" }
-
 // pinDeviceID 把本次登录用的特征码固化下来；由 devid 子命令接入。
-var pinDeviceID = func(*app, string) error { return errors.New("设备标识模块未接入") }
+var pinDeviceID = func(*app, devid.HardID) error { return errors.New("设备特征码模块未接入") }

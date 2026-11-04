@@ -104,7 +104,7 @@ POST /por/login_hid.csp?manual_submit=1
 Content-Type: application/x-www-form-urlencoded
 Cookie: TWFID=<第 1 步的令牌>
 
-hid=<32 位大写十六进制>&hostname=<主机名>&macaddress=<MAC>&ignore=0&svpn_req_randcode=<CSRF>
+hid=<32 位大写十六进制>&hostname=<base64 主机名>&macaddress=<aa-bb-cc-dd-ee-ff>&ignore=0&svpn_req_randcode=<CSRF>
 ```
 
 四条硬约束，缺任何一条都会被网关判 `ErrorCode=20210`（`submit param error.`）：
@@ -116,8 +116,9 @@ hid=<32 位大写十六进制>&hostname=<主机名>&macaddress=<MAC>&ignore=0&sv
 
 **反重放握手**：网关判 `20210` 时会在响应里回一个新的 `CSRF_RAND_CODE`，这是"带上新值再试一次"的信号，
 因此实现携带 `svpn_req_randcode`，并在被判 `20210` 时用响应里的新 CSRF 重试**一次**（不无限重试）。
-`hostname` 用 `os.Hostname()`，`macaddress` 用大写冒号分隔的 `AA:BB:CC:DD:EE:FF`；
-两者是给管理员审批时看的元数据，网关真正比对的是 `hid`。
+三段的取值全部照官方 SDK 的形式（`docs/06` §3）：`hostname` 是**标准 base64** 的主机名，
+`macaddress` 是**小写连字符**的 `aa-bb-cc-dd-ee-ff`。两者是给管理员审批时看的元数据，
+网关真正比对的是 `hid`；但形状不对一样会被判 `20210`。
 
 **响应**
 
@@ -136,10 +137,10 @@ hid=<32 位大写十六进制>&hostname=<主机名>&macaddress=<MAC>&ignore=0&sv
 POST /por/submithid.csp
 Content-Type: application/x-www-form-urlencoded
 
-hid=<特征码>&hostname=<主机名>&macaddress=<MAC>
+hid=<特征码>&hostname=<base64 主机名>&macaddress=<aa-bb-cc-dd-ee-ff>
 ```
 
-三个字段都在表单体里，没有查询串，也没有 `ignore`。`macaddress` 同样是冒号分隔。
+三个字段都在表单体里，没有查询串，也没有 `ignore`。三段值的形状与 §4.1 完全一致。
 
 网关的特征码页（`GET /por/hardid.csp?manual_submit=1`）会直接说明该走哪条路，典型回执：
 
@@ -162,8 +163,10 @@ hid=<特征码>&hostname=<主机名>&macaddress=<MAC>
 
 ### 4.2.1 取特征码的本地接口
 
-界面上显示的特征码来自客户端本地服务，不是自己算的：`Q_HID` 查询返回
-`hid|macAddress|hostName` 三段以 `|` 分隔的字符串，`Q_ALLHID` 返回完整清单。
+界面上显示的特征码来自客户端本地服务：`Q_HID` 查询返回 `hid|macAddress|hostName`
+三段以 `|` 分隔的字符串，`Q_ALLHID` 返回完整清单。SDK 的 `getHid` 把它按 `|` 切开后
+分别填进 §4.1 的三个字段——这就是三段值的来源，已核对到实现层。
+
 本实现不依赖该本地服务，直接按 `docs/06` 计算，因此**算出的值必须与在册值一致**，
 否则网关侧看到的是一台陌生设备。
 
@@ -172,10 +175,10 @@ hid=<特征码>&hostname=<主机名>&macaddress=<MAC>
 自动提交会把机器登记进网关的设备绑定队列，属于有副作用的操作，因此**默认关闭**：
 命中二次认证且未开启时，报 `ErrSecondFactor` 并提示加 `--register-device`（配置项 `auth.register_device`）。
 
-开启后每次登录都会带上本机特征码。特征码由网卡列表等要素现算，**要素一变值就变**——
+开启后每次登录都会带上本机特征码。特征码由磁盘序列号与网卡列表现算，**要素一变值就变**——
 换 Wi-Fi、插网线、起 docker 都会让网关把本机当成新设备，于是又要求审批一次。
 
-因此实现了自动固化：`--register-device` 登录成功后，立即把本次用的特征码写入 `device-id`
+因此实现了自动固化：`--register-device` 登录成功后，立即把本次用的三段值写入 `device-id`
 （`docs/06` §5），之后一律用它。这样同一台机器只审批一次；换机器时删掉该文件或
 `vpnkit devid pin` 重新固化即可。
 

@@ -44,8 +44,8 @@ func cmdStatus(a *app, args []string) error {
 		out["session"] = map[string]any{"state": "idle"}
 	}
 	if *showDevid {
-		if id, _, err := devid.Get(a.dir, devid.SystemSource{}); err == nil {
-			out["device_id"] = id
+		if id, _, err := devid.Load(a.dir, devid.SystemSource{}); err == nil {
+			out["device_id"] = id.String()
 		}
 	}
 	if a.g.json {

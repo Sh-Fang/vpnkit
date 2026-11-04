@@ -145,7 +145,7 @@ func TestLoginRegisterDevicePinsDevID(t *testing.T) {
 		Users:          map[string]string{"alice": "pw-1"},
 		NextAuth:       "4",
 		NextService:    "auth/hid",
-		HIDExpectDevID: currentDeviceID(t),
+		HIDExpectDevID: currentHID(t),
 	})
 	addr, ca := gateway(t, as)
 	t.Setenv("VPNKIT_PASSWORD", "pw-1")
@@ -162,13 +162,24 @@ func TestLoginRegisterDevicePinsDevID(t *testing.T) {
 	}
 }
 
-// currentDeviceID 返回本机当前算出的特征码（测试机固定，故可直接当期望值用）。
-func currentDeviceID(t *testing.T) string {
+// currentHID 返回本机当前算出的第一段（网关只认这一段）。
+func currentHID(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
-	id, _, err := devid.Get(home, devid.SystemSource{})
+	id, _, err := devid.Load(home, devid.SystemSource{})
 	if err != nil {
 		t.Skipf("本机取不到特征码要素: %v", err)
 	}
-	return id
+	return id.HID
+}
+
+// currentDeviceID 返回本机当前算出的完整三段值（测试机固定，故可直接当期望值用）。
+func currentDeviceID(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	id, _, err := devid.Load(home, devid.SystemSource{})
+	if err != nil {
+		t.Skipf("本机取不到特征码要素: %v", err)
+	}
+	return id.String()
 }

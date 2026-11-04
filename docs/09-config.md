@@ -19,7 +19,7 @@ user           = "alice"
 mitm_field     = "mitm_result"   # 或 "mitm"
 send_rand_code = false
 send_device_id = "auto"         # auto | always | never；auto 看上次登录缓存的 Other.isHidUser
-device_id_field = "devid"       # 设备标识表单字段名，待实测，docs/06 §6
+device_id_field = "devid"       # 设备标识表单字段名，待实测，docs/06 §3
 register_device = false         # true 时网关要 auth/hid 二次认证会提交本机特征码（docs/02 §4）
 hid_endpoint   = "/por/login_hid.csp"  # 特征码认证端点，表单体只放特征码
 hid_query      = "manual_submit=1"  # 该端点固定的查询串
