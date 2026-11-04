@@ -30,6 +30,8 @@
 
 ## 快速开始
 
+前置：Go 1.22 或更新（`go version` 确认；没有的话见 `docs/10` §1）。
+
 ```bash
 go build -o vpnkit ./cmd/vpnkit
 
