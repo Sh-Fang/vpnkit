@@ -466,6 +466,25 @@ func TestExtraRoutesAndDNSFallback(t *testing.T) {
 	<-done
 }
 
+func TestDNSServerOutsideRoutesGetsHostRoute(t *testing.T) {
+	h := newHarness(t, "happy", func(o *Options) {
+		o.DNSServers = []string{"10.0.0.53", "198.51.100.53"}
+		o.DNSSuffixes = []string{"corp.example.com"}
+	})
+	_, cancel, done := h.run(t, 10*time.Second)
+	defer cancel()
+	h.waitState(t, Running, 5*time.Second)
+	var rs []string
+	for _, r := range h.net.applies[0].Routes {
+		rs = append(rs, r.String())
+	}
+	if strings.Join(rs, ",") != "10.0.0.0/8,198.51.100.53/32" {
+		t.Fatalf("routes %v", rs)
+	}
+	cancel()
+	<-done
+}
+
 func TestHandshakeRejectedFirstAttemptExit4(t *testing.T) {
 	h := newHarness(t, "happy", func(o *Options) { o.Token = "ffffffffffffffff" })
 	err := runToEnd(t, h, 5*time.Second)

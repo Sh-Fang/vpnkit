@@ -40,6 +40,7 @@ type TunnelServer struct {
 	CtrlConns       atomic.Int64
 	ClientHeartbeat atomic.Int64
 	UpPackets       atomic.Int64
+	DNSQueries      atomic.Int64
 	lastCtrlType    atomic.Int64
 	lastDataTrailer sync.Map // connType → trailer
 }
@@ -299,6 +300,11 @@ func (s *TunnelServer) up(c net.Conn, token string) {
 		}
 		s.UpPackets.Add(1)
 		if reply := EchoReply(body); reply != nil {
+			_ = s.sendDown(ts, reply)
+		}
+		if reply, name := DNSReply(body); reply != nil {
+			s.DNSQueries.Add(1)
+			s.cfg.Logf("DNS 查询 %s", name)
 			_ = s.sendDown(ts, reply)
 		}
 	}

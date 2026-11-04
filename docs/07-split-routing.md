@@ -94,6 +94,8 @@ suffixes = ["corp.example.com", "internal.example.com"]
 servers = ["10.0.0.53"]
 ```
 
+隧道 DNS 服务器地址不在内网网段内时，自动为它补一条指向 TUN 的 /32 路由；否则分区解析的查询会经默认路由从物理网卡发出。该地址与隧道服务端地址相同时不补（会回环），只告警。
+
 ### 3.3 各平台实现
 
 **macOS** —— `/etc/resolver/<suffix>`

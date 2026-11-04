@@ -77,7 +77,7 @@ script:
 | `drop` | 首次运行中服务端直接断开，之后正常（测网络退避与恢复） |
 | `unknown-cmd` | 运行中发未知码 99 与 4（测记录并忽略、连接保持） |
 
-假网关的数据通道会对 ICMP echo 请求作答，配合内存 TUN 即可端到端验证收发。
+假网关的数据通道会对 ICMP echo 请求作答，配合内存 TUN 即可端到端验证收发。发往 53 端口的 UDP 查询也会得到应答：A 查询一律回 `198.18.0.10`，其他类型回空的 NOERROR，用于验证 DNS 分区走隧道。
 
 无 root 时可用 `vpnkit up --fake-tun` 对着 testserver 跑完整 CLI：内存 TUN，路由/DNS 只打印不执行。
 

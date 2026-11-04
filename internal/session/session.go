@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -533,6 +534,23 @@ func (s *Session) prepare(ctx context.Context) (*prepared, error) {
 		p.bypass = append(p.bypass, ips...)
 		// 用解析出的 IP 连接，保证连接目标正是加了防回环路由的地址
 		p.addrs[i] = net.JoinHostPort(ips[0].String(), port)
+	}
+	// 隧道 DNS 服务器不在内网网段内时，分区解析的查询会经默认路由从物理网卡发出（docs/07 §3）。
+	if len(p.suffixes) > 0 {
+	dnsLoop:
+		for _, d := range p.dnsServers {
+			for _, r := range p.routes {
+				if r.Contains(d) {
+					continue dnsLoop
+				}
+			}
+			if slices.Contains(p.bypass, d) {
+				s.warn(fmt.Sprintf("隧道 DNS 服务器 %s 与隧道服务端地址相同，不为其加隧道路由", d))
+				continue
+			}
+			p.routes = append(p.routes, netip.PrefixFrom(d, 32))
+			s.log.Info("隧道 DNS 服务器不在内网网段内，补充主机路由", "dns", d)
+		}
 	}
 	if s.o.Tunnel.Transport == "udp" {
 		s.warn("UDP 承载尚未实现（P5），使用 TCP")
