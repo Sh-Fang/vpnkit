@@ -119,6 +119,20 @@ hid=<32 位大写十六进制>&hostname=<base64 主机名>&macaddress=<aa-bb-cc-
 多带一个字段本身就是形状偏离。因此默认严格照 SDK 发四个字段；确实需要回显时用
 `auth.hid_echo_csrf = true` 显式打开，打开后才允许在 `20210` 时用新 CSRF 重试一次。
 
+**校验顺序（实测）**：网关先校验会话状态，再校验参数。用一条**未登录**的会话
+（`GET /por/login_auth.csp` 拿到的 TWFID）打 `login_hid.csp`，无论表单内容怎么变——
+四字段正确、MAC 写成大写冒号、主机名不编码、多带 `svpn_req_randcode`、甚至 `hid=XYZ`——
+回执一律是：
+
+```xml
+<ErrorCode>20026</ErrorCode><Message>unexpected secondary auth</Message>
+<Note>User has not logged in yet or timed out!</Note>
+```
+
+结论：`20210` 只可能在**密码步通过、会话进入待提交特征码状态**之后出现，
+所以未登录状态下的形状试验区分不出好坏，别在那上面浪费时间。
+反过来，只要看到 `20210`，就说明会话是对的、问题在被提交的内容上。
+
 三段的取值全部照官方 SDK 的形式（`docs/06` §3）：`hostname` 是**标准 base64** 的主机名，
 `macaddress` 是**小写连字符**的 `aa-bb-cc-dd-ee-ff`。两者是给管理员审批时看的元数据，
 网关真正比对的是 `hid`；但形状不对一样会被判 `20210`。
