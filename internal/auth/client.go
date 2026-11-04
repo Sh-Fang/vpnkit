@@ -381,21 +381,25 @@ func (c *Client) submitHID(ctx context.Context, token, csrf string, req LoginReq
 	logx.Assumption(c.log, "hid_result", res.fields["Result"],
 		"error_code", res.code, "next_auth", res.fields["NextAuth"], "message", res.message,
 		"twfid_in_response", res.token != "")
-	switch {
-	case res.ok && (res.fields["NextAuth"] == "" || res.fields["NextAuth"] == "-1"):
+	if res.ok {
+		if res.fields["NextAuth"] != "" && res.fields["NextAuth"] != "-1" {
+			return "", fmt.Errorf("%w: %w（特征码通过后仍需 NextAuth=%s NextService=%s）",
+				vpnerr.ErrAuth, ErrSecondFactor, res.fields["NextAuth"], res.fields["NextService"])
+		}
 		return firstNonEmpty(res.token, token), nil
-	case res.ok:
-		return "", fmt.Errorf("%w: %w（特征码通过后仍需 NextAuth=%s NextService=%s）",
-			vpnerr.ErrAuth, ErrSecondFactor, res.fields["NextAuth"], res.fields["NextService"])
-	case res.code == hidParamErrCode:
-		// 仍被判参数错误：把网关那张特征码页读回来（只读 GET），它的表单就是权威的字段清单。
+	}
+
+	// 被判参数错误说明请求本身不合法，再拿同样的形状去提交申请没有意义：
+	// 直接把网关那张特征码页读回来（只读 GET），它的表单才是权威字段清单。
+	if res.code == hidParamErrCode {
 		c.dumpHIDPage(ctx, token)
 		return "", fmt.Errorf("%w: %w（网关判 param error：字段 %q 或取值不被接受；"+
 			"确认 auth.hid_field 与 auth.hid_query，特征码须为 32 位大写十六进制）",
 			vpnerr.ErrAuth, ErrDevicePending, c.o.HIDField)
 	}
-	// 认证不通过又没被判 param error：多数是「未绑定的新设备」——认证步骤本身不负责登记，
-	// 要另发一次绑定申请才会进管理员审批队列（docs/02 §4.2）。
+
+	// 其余失败：认证步骤本身不负责登记，要另发一次绑定申请才会进管理员审批队列
+	// （docs/02 §4.2）。界面 SDK 在同样位置的原话就是「login error by hardid, maybe need submit」。
 	regTok, regErr := c.submitHIDRegistration(ctx, token, req)
 	switch {
 	case regErr == nil:
