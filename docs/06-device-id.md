@@ -171,8 +171,32 @@ hid|macAddress|hostName
 
 | 平台 | 状态 |
 |---|---|
-| Linux | 已实现并逐字节核对 |
-| macOS / Windows | 取数未实现，`diskSerial` 返回 `ErrUnsupported`，只剩 MAC 这路 |
+| Linux | 已实现，并与原实现逐字节对拍（§4） |
+| Windows | 取数未实现，`diskSerial` 返回 `ErrUnsupported`，只剩 MAC 这路 |
+| macOS | 取数未实现 |
+
+### 8.1 与 Windows 实现的比对结果
+
+已核对的底层原语在两边**完全一致**：
+
+| 原语 | Windows | Linux |
+|---|---|---|
+| 摘要 | MD5（`MD5Init/Update/Final` 三件套，上下文 88 字节） | MD5 |
+| 十六进制表 | `"0123456789ABCDEF"`（大写） | 同 |
+| MAC 取法 | `GetAdaptersInfo`，取 `Type == 6` 或以 `0x47` 结尾，跳过 Loopback | `SIOCGIFHWADDR`，由 sysfs 判定物理网卡 |
+| MAC 文本 | `%02x-%02x-%02x-%02x-%02x-%02x` | 同 |
+| 主机名 | 走 Base64 | 同 |
+| 输出 | 32 位大写十六进制 | 同 |
+
+**但要素的合成方式不一样**，这一点必须注意：
+
+- Windows 是**三选一**：缓存文件 > 网卡 MAC > 卷序列号，选中的那一个直接做 MD5；
+- Linux 是**两路折叠**：磁盘序列号与网卡 MAC 各自做 MD5，再逐字符折叠（§3.2）。
+
+所以两平台算出的 `hid` 不是同一套推导，**固化值不能跨平台搬运**。
+`device-id` 只在本机本平台有效（§5 的使用边界），换平台必须重新算、重新登记。
+
+macOS 实现尚未核对，不要假定它与上面任一个相同。
 
 macOS 与 Windows 客户端的算法尚未逐字节核对，不要假定与 Linux 完全一致。
 
