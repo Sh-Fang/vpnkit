@@ -2,12 +2,12 @@ package config
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Sh-Fang/vpnkit/internal/fsutil"
 	"github.com/Sh-Fang/vpnkit/internal/vpnerr"
 )
 
@@ -49,7 +49,7 @@ x = 1
 func TestLoadSample(t *testing.T) {
 	d := t.TempDir()
 	p := filepath.Join(d, "config.toml")
-	os.WriteFile(p, []byte(sample), 0o600)
+	fsutil.WriteFile(p, []byte(sample))
 	c, err := Load(p)
 	if err != nil {
 		t.Fatal(err)

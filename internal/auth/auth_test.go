@@ -6,13 +6,13 @@ import (
 	"net"
 	"net/http/httptest"
 	"net/netip"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Sh-Fang/vpnkit/internal/fsutil"
 	"github.com/Sh-Fang/vpnkit/internal/vpnerr"
 	"github.com/Sh-Fang/vpnkit/testserver"
 )
@@ -234,9 +234,8 @@ func TestSessionStore(t *testing.T) {
 	if err := SaveSession(d, s); err != nil {
 		t.Fatal(err)
 	}
-	st, _ := os.Stat(SessionPath(d, "vpn.example.com"))
-	if st.Mode().Perm() != 0o600 {
-		t.Fatalf("perm %v", st.Mode().Perm())
+	if ok, err := fsutil.Private(SessionPath(d, "vpn.example.com")); err != nil || !ok {
+		t.Fatalf("session file not private: %v", err)
 	}
 	got, err := LoadSession(d, "vpn.example.com")
 	if err != nil || got.TwfID != s.TwfID {

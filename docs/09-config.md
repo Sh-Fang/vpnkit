@@ -68,7 +68,9 @@ file_keep = 10                   # --verbose/--trace 时日志文件保留份数
 | `device-id` | 设备标识（32 位大写 hex） | `devid pin` 写入，长期保留 |
 | `state.json` | 运行时变更记录 | `up` 写入，`down` 删除 |
 
-全部 `0600`，全部不进仓库。
+全部 `0600`，全部不进仓库。状态目录本身为 `0700`。
+
+Windows 忽略权限位，「`0600`」在 Windows 上的等价物是：DACL 只含当前令牌用户的完全控制，并切断继承（目录额外带 `OICI`，其下新建文件自动继承）。用令牌用户而非文件属主，是因为提权进程创建的文件属主可能是 Administrators 组，非提权的 `login`/`status` 仍需能读。检查配置文件权限时，DACL 中只出现当前用户、SYSTEM、Administrators 视为私有。
 
 ## 3. 网关下发的配置
 

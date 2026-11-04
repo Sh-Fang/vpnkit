@@ -3,7 +3,6 @@ package fsutil
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -13,12 +12,8 @@ func TestWriteFilePerm(t *testing.T) {
 	if err := WriteFile(p, []byte("x")); err != nil {
 		t.Fatal(err)
 	}
-	st, err := os.Stat(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 {
-		t.Fatalf("perm %v", st.Mode().Perm())
+	if ok, err := Private(p); err != nil || !ok {
+		t.Fatalf("not private: %v", err)
 	}
 	if err := WriteFile(p, []byte("yy")); err != nil {
 		t.Fatal(err)

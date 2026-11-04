@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/Sh-Fang/vpnkit/internal/fsutil"
 	"github.com/Sh-Fang/vpnkit/pkg/wire"
 )
 
@@ -99,8 +100,8 @@ func TestCacheAndPin(t *testing.T) {
 	if err := Pin(d, pinned); err != nil {
 		t.Fatal(err)
 	}
-	if st, _ := os.Stat(CachePath(d)); st.Mode().Perm() != 0o600 {
-		t.Fatalf("perm %v", st.Mode().Perm())
+	if ok, err := fsutil.Private(CachePath(d)); err != nil || !ok {
+		t.Fatalf("cache file not private: %v", err)
 	}
 	src.calls = 0
 	got, fromCache, err := Get(d, src)

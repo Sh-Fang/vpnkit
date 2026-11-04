@@ -143,8 +143,8 @@ func Load(path string) (*Config, error) {
 		if err := c.apply(string(b)); err != nil {
 			return nil, fmt.Errorf("%w: 配置文件 %s: %w", vpnerr.ErrUsage, path, err)
 		}
-		if st, err := os.Stat(path); err == nil && st.Mode().Perm()&0o077 != 0 {
-			c.Warnings = append(c.Warnings, fmt.Sprintf("配置文件 %s 权限为 %v，建议 0600", path, st.Mode().Perm()))
+		if ok, err := fsutil.Private(path); err == nil && !ok {
+			c.Warnings = append(c.Warnings, fmt.Sprintf("配置文件 %s 其他用户可访问，建议收紧为仅本人可读写（0600）", path))
 		}
 	case errors.Is(err, os.ErrNotExist) && !explicit:
 	default:

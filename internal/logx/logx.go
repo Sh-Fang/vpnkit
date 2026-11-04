@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Sh-Fang/vpnkit/internal/fsutil"
 )
 
 // LevelTrace 比 debug 更低一级，用于每包 IP 头摘要（docs/11 §8.1）。
@@ -54,11 +56,11 @@ func Setup(o Options) (*slog.Logger, func(), error) {
 	closeFn := func() {}
 	var filePath string
 	if o.FileDir != "" {
-		if err := os.MkdirAll(o.FileDir, 0o700); err != nil {
+		if err := fsutil.MkdirPrivate(o.FileDir); err != nil {
 			return nil, closeFn, err
 		}
 		filePath = filepath.Join(o.FileDir, "vpnkit-"+time.Now().Format("20060102-150405")+".log")
-		f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		f, err := fsutil.OpenPrivate(filePath)
 		if err != nil {
 			return nil, closeFn, err
 		}

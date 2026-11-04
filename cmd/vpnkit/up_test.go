@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -73,7 +75,8 @@ func TestUpFakeTunKickExit7(t *testing.T) {
 	if ts.CtrlConns.Load() != 1 {
 		t.Fatal("must not reconnect after kick")
 	}
-	for _, w := range []string{"stage=1", "bytes=82", "bytes=122", "bytes=43", "bytes=76", "bytes=40", "to=running", "assumption=sendip_layout", "+ ip route add 10.0.0.0/8 dev memtun0"} {
+	for _, w := range []string{"stage=1", "bytes=82", "bytes=122", "bytes=43", "bytes=76", "bytes=40", "to=running", "assumption=sendip_layout",
+		"+ " + route.ShellQuote(route.RouteAddCmd(runtime.GOOS, netip.MustParsePrefix("10.0.0.0/8"), "memtun0"))} {
 		if !strings.Contains(errOut, w) {
 			t.Errorf("missing %q in output", w)
 		}

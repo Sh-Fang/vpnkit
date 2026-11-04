@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Sh-Fang/vpnkit/internal/auth"
+	"github.com/Sh-Fang/vpnkit/internal/fsutil"
 	"github.com/Sh-Fang/vpnkit/testserver"
 )
 
@@ -52,9 +53,8 @@ func TestLoginLogoutCLI(t *testing.T) {
 	}
 	host := strings.Split(addr, ":")[0]
 	p := auth.SessionPath(home, host)
-	st, err := os.Stat(p)
-	if err != nil || st.Mode().Perm() != 0o600 {
-		t.Fatalf("session file %v %v", st, err)
+	if ok, err := fsutil.Private(p); err != nil || !ok {
+		t.Fatalf("session file not private: %v", err)
 	}
 	s, _ := auth.LoadSession(home, host)
 	if !as.ValidToken(s.TwfID) {

@@ -43,11 +43,36 @@ func EnsureDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(d, 0o700); err != nil {
+	if err := MkdirPrivate(d); err != nil {
 		return "", fmt.Errorf("创建状态目录: %w", err)
 	}
-	chownToSudoUser(d)
 	return d, nil
+}
+
+// MkdirPrivate 创建目录并收紧为仅本人可访问（0700）。
+func MkdirPrivate(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := restrict(dir, true); err != nil {
+		return err
+	}
+	chownToSudoUser(dir)
+	return nil
+}
+
+// OpenPrivate 以追加方式打开（必要时创建）仅本人可读写的文件（0600）。
+func OpenPrivate(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := restrict(path, false); err != nil {
+		f.Close()
+		return nil, err
+	}
+	chownToSudoUser(path)
+	return f, nil
 }
 
 // WriteFile 原子写入 0600 文件：先写临时文件再 rename，避免进程中断留下半截令牌。
@@ -61,7 +86,7 @@ func WriteFile(path string, data []byte) error {
 	}
 	name := tmp.Name()
 	defer os.Remove(name)
-	if err := tmp.Chmod(0o600); err != nil {
+	if err := restrict(name, false); err != nil {
 		tmp.Close()
 		return err
 	}
