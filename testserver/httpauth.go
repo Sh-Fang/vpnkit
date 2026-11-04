@@ -25,9 +25,19 @@ type AuthConfig struct {
 	KeepTwfID bool
 	// NextAuth 非空时登录成功响应带 <NextAuth>，测试二次认证分支。
 	NextAuth string
-	Captcha  bool
-	ConfXML  string
-	RCList   string
+	// NextService 非空时随 NextAuth 一起下发；含 "hid" 时进入特征码登记流程（需后续提交 hid）。
+	NextService string
+	// HIDField 是特征码提交字段名，默认 svpn_inputhid；HIDExpectDevID 非空时校验提交的特征码。
+	HIDField       string
+	HIDExpectDevID string
+	Captcha        bool
+	ConfXML        string
+	RCList         string
+}
+
+type hidState struct {
+	csrf string
+	user string
 }
 
 type pending struct {
@@ -40,10 +50,12 @@ type AuthServer struct {
 	cfg        AuthConfig
 	keyA, keyB *rsa.PrivateKey
 
-	mu       sync.Mutex
-	pending  map[string]pending
-	sessions map[string]string // token → user
-	lastForm url.Values
+	mu         sync.Mutex
+	pending    map[string]pending
+	hidPending map[string]hidState // twf → 等待 hid 提交的会话
+	sessions   map[string]string   // token → user
+	lastForm   url.Values
+	lastHID    url.Values
 }
 
 func NewAuthServer(cfg AuthConfig) (*AuthServer, error) {
@@ -58,7 +70,10 @@ func NewAuthServer(cfg AuthConfig) (*AuthServer, error) {
 	if cfg.ConfXML == "" {
 		cfg.ConfXML = ConfXML(443)
 	}
-	return &AuthServer{cfg: cfg, keyA: a, keyB: b, pending: map[string]pending{}, sessions: map[string]string{}}, nil
+	if cfg.HIDField == "" {
+		cfg.HIDField = "svpn_inputhid"
+	}
+	return &AuthServer{cfg: cfg, keyA: a, keyB: b, pending: map[string]pending{}, hidPending: map[string]hidState{}, sessions: map[string]string{}}, nil
 }
 
 // ConfXML 返回 docs/09 §3 形态的 conf.csp，隧道端口指向 tunnelPort。
@@ -125,6 +140,7 @@ func (s *AuthServer) Handler() http.Handler {
 	mux.HandleFunc("/por/login_auth.csp", s.loginAuth)
 	mux.HandleFunc("/public/psw_config", s.pswConfig)
 	mux.HandleFunc("/por/login_psw.csp", s.loginPsw)
+	mux.HandleFunc("/por/login_hid.csp", s.loginHID)
 	mux.HandleFunc("/por/conf.csp", s.authed(func(w http.ResponseWriter) { fmt.Fprint(w, s.cfg.ConfXML) }))
 	mux.HandleFunc("/por/rclist.csp", s.authed(func(w http.ResponseWriter) { fmt.Fprint(w, s.cfg.RCList) }))
 	return mux
@@ -223,6 +239,16 @@ func (s *AuthServer) loginPsw(w http.ResponseWriter, r *http.Request) {
 		fail("用户名或密码错误")
 		return
 	}
+	// 特征码登记：成功后不立即发会话，改为下发 NextService=auth/hid + 新 CSRF，等 hid 提交。
+	if s.cfg.NextAuth != "" && strings.Contains(s.cfg.NextService, "hid") {
+		csrf := strings.ToUpper(randHex(8))
+		s.mu.Lock()
+		s.hidPending[twf] = hidState{csrf: csrf, user: user}
+		s.mu.Unlock()
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><ErrorCode>1</ErrorCode><Message>Auth is success</Message><CurAuth>1</CurAuth><IsFirstAuth>1</IsFirstAuth><NextAuth>%s</NextAuth><NextService>%s</NextService><CSRF_RAND_CODE>%s</CSRF_RAND_CODE></Auth>`,
+			s.cfg.NextAuth, s.cfg.NextService, csrf)
+		return
+	}
 	if s.cfg.KeepTwfID || s.cfg.NextAuth != "" {
 		s.mu.Lock()
 		s.sessions[twf] = user
@@ -236,6 +262,64 @@ func (s *AuthServer) loginPsw(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: "TWFID", Value: newID})
 	fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>1</Result><Message>login success</Message><TwfID>%s</TwfID></Auth>`, newID)
+}
+
+// loginHID 模拟特征码登记端点：GET 回一张声明字段的表单，POST 校验特征码与 CSRF 后发会话。
+func (s *AuthServer) loginHID(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "text/xml")
+		fmt.Fprint(w, `<?xml version="1.0" encoding="utf-8"?><Auth><NextService>auth/hid</NextService><`+s.cfg.HIDField+`/></Auth>`)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	twf := token(r)
+	s.mu.Lock()
+	s.lastHID = r.PostForm
+	st, ok := s.hidPending[twf]
+	s.mu.Unlock()
+	fail := func(code, msg string) {
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>0</Result><ErrorCode>%s</ErrorCode><Message>%s</Message><Note>%s</Note></Auth>`, code, msg, msg)
+	}
+	if !ok {
+		fail("30001", "no hid session")
+		return
+	}
+	// 字段名不对返回 20210 submit param error，且保留待登记会话，让客户端换候选字段再试（镜像真机）。
+	devid := r.PostForm.Get(s.cfg.HIDField)
+	if devid == "" {
+		fail("20210", "submit param error.")
+		return
+	}
+	if r.PostForm.Get("svpn_req_randcode") != st.csrf {
+		fail("20210", "submit param error.")
+		return
+	}
+	s.mu.Lock()
+	delete(s.hidPending, twf)
+	s.mu.Unlock()
+	if s.cfg.HIDExpectDevID != "" && devid != s.cfg.HIDExpectDevID {
+		// 未登记的机器：进审批队列（非 param error，用别的错误码）。
+		fail("30005", "设备未登记，已提交管理员审批")
+		return
+	}
+	s.mu.Lock()
+	s.sessions[twf] = st.user
+	s.mu.Unlock()
+	fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>1</Result><Message>hid auth success</Message></Auth>`)
+}
+
+// LastHIDForm 返回最近一次 hid 提交的表单。
+func (s *AuthServer) LastHIDForm() url.Values {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastHID
 }
 
 func (s *AuthServer) authed(write func(http.ResponseWriter)) http.HandlerFunc {

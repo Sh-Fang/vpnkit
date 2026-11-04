@@ -86,8 +86,33 @@ send_rand_code = false       # 未启用图形验证码时
 也不发 `Set-Cookie`，令牌沿用第 1 步拿到的那个。因此带明确成功码（`Result=1` 或 `ErrorCode=1`）时放行，
 沿用原令牌，打 warn 与 `assumption=login_same_twfid`。
 
-成功响应若带 `NextAuth` 且不是 `-1`，说明网关还要二次认证（短信、令牌等），当前版本报 `ErrSecondFactor`，
+成功响应若带 `NextAuth` 且不是 `-1`，说明网关还要二次认证（短信、令牌、设备登记等），当前版本报 `ErrSecondFactor`，
 退出码 3。`NextAuth`、`NextService` 的值记入 `assumption=login_next_auth`。
+
+实测深信服 M7.6.8R2 对启用设备绑定的账号返回 `NextAuth=4 NextService=auth/hid`（hid = 硬件标识登记，
+对应 SDK 枚举 `SFAuthTypeHardId=4`）。实测该步响应 `CurAuth=1 IsFirstAuth=1`，`NextServiceSubType`/
+`ChallengeMsg`/`AuthInfo` 为空、另带一个新的 `CSRF_RAND_CODE`——即纯特征码提交、无短信/令牌式交互。
+
+**auth/hid 的提交线格式无处可查**（所有开源重实现只做了密码/短信/令牌，官方封在 native 层）。因此命中二次认证时：
+
+- 先把响应体里出现的全部 XML 标签名（**只记名字、不记值**）记入 `assumption=hid_response_tags`，
+  再把 `CurAuth`/`NextServiceSubType`/`ChallengeMsg`/`AuthInfo`/`IsFirstAuth` 等描述性字段记入 `assumption=hid_probe`。
+- 默认不自动提交（避免普通登录静默把机器登记进网关的设备绑定队列），报 `ErrSecondFactor` 并提示加 `--register-device`。
+- 开启 `auth.register_device`（或 `--register-device`）后提交本机特征码。**实测端点确为 `/por/login_hid.csp`**
+  （GET/POST 均 200），每次提交前先只读 GET 取这一步自己的 `CSRF_RAND_CODE`（`assumption=hid_get`），POST 必须
+  回显该 CSRF（用 login_psw 那步的旧 CSRF 会被拒）。
+- **字段名仍待定**：按命名规律 `svpn_input<service>`（`auth/sms`→`svpn_inputsms`、`auth/token`→`svpn_inputtoken`）
+  推断 `auth/hid`→`svpn_inputhid`。网关对字段名不符返回 `ErrorCode=20210`（"submit param error."），因此实现为
+  **候选轮询**：先用 `auth.hid_field`（默认 `svpn_inputhid`），被判 20210 就按 `svpn_hid`/`svpn_hardid`/`hid`/`hardid`
+  依次换、每次重取 CSRF，命中非 20210 即停。一次运行内定位真实字段，避免反复联调。
+  实测带 `?apiversion=1` 后 GET/POST 仍一律回 20210（连空 GET 也回），故同时按官方模板变量 `hid`/`macaddress`/`hostname`
+  并列的提示，提交时附带本机 `macaddress`（主物理网卡 MAC，大写冒号分隔）与 `hostname`——网关可能要三者齐备才收。
+  MAC 格式与是否必需均为假设点，联调据真实协议回填。
+- 每次尝试记 `assumption=hid_submit`（字段名 + 特征码掩码）与 `assumption=hid_result`（字段名 + 标签名 + 返回码 +
+  可读消息，令牌只记有无）。成功且无后续 NextAuth 即放行（有新 `TwfID` 用之，否则沿用原令牌）；非 param-error 的失败
+  多为进管理员审批队列，报 `ErrDevicePending` 并透传网关消息。联调确认真实字段/返回码后回填默认值。
+
+设备标识由 `internal/devid` 计算，登记成功后应 `devid pin` 固化（`docs/06` §5），这样网络/网卡变化不会让网关把本机当成新设备而要求重新审批。
 
 图形验证码：`RndImg=1` 时当前版本直接报错（退出码 3），暂不支持拉取验证码图片；`--captcha` 仅用于已知验证码的场景。
 

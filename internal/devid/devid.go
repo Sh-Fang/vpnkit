@@ -106,6 +106,32 @@ func Collect(src Source) (FingerprintParts, error) {
 	return p, nil
 }
 
+// PrimaryMAC 返回按接口名排序后的第一张物理网卡 MAC，大写、冒号分隔（AA:BB:CC:DD:EE:FF）。
+// 供 auth/hid 登记连同 hid、hostname 一起上报（docs/06 §6）；格式为假设点，联调据网关回填。
+func PrimaryMAC(src Source) (string, bool) {
+	ifs, err := src.Interfaces()
+	if err != nil {
+		return "", false
+	}
+	ifs = append([]Iface(nil), ifs...)
+	sort.Slice(ifs, func(i, j int) bool { return ifs[i].Name < ifs[j].Name })
+	for _, i := range ifs {
+		if i.Loopback || isVirtual(i.Name) {
+			continue
+		}
+		raw := strings.ToUpper(strings.NewReplacer(":", "", "-", "", ".", "").Replace(i.MAC))
+		if raw == "" || strings.Trim(raw, "0") == "" || len(raw) != 12 {
+			continue
+		}
+		var parts []string
+		for j := 0; j < 12; j += 2 {
+			parts = append(parts, raw[j:j+2])
+		}
+		return strings.Join(parts, ":"), true
+	}
+	return "", false
+}
+
 // FormatVolumeSerial 按 "%02x%02X%02x%02x" 格式化，第二字节大写——
 // 照抄原客户端的既有行为（服务端按其输出登记过），不要"修正"（docs/06 §2.2）。
 func FormatVolumeSerial(v uint32) string {

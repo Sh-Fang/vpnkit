@@ -69,16 +69,20 @@ func (s *serverFlags) apply(a *app) {
 
 func (a *app) authClient() (*auth.Client, error) {
 	return auth.New(auth.Options{
-		Server:        a.cfg.Server.Host,
-		Port:          a.cfg.Server.Port,
-		Insecure:      a.cfg.Server.Insecure,
-		CAFile:        a.cfg.Server.CAFile,
-		CertSHA256:    a.cfg.Server.CertSHA256,
-		Timeout:       a.g.timeout,
-		MitmField:     a.cfg.Auth.MitmField,
-		SendRandCode:  a.cfg.Auth.SendRandCode,
-		DeviceIDField: a.cfg.Auth.DeviceIDField,
-		Logger:        a.log,
+		Server:         a.cfg.Server.Host,
+		Port:           a.cfg.Server.Port,
+		Insecure:       a.cfg.Server.Insecure,
+		CAFile:         a.cfg.Server.CAFile,
+		CertSHA256:     a.cfg.Server.CertSHA256,
+		Timeout:        a.g.timeout,
+		MitmField:      a.cfg.Auth.MitmField,
+		SendRandCode:   a.cfg.Auth.SendRandCode,
+		DeviceIDField:  a.cfg.Auth.DeviceIDField,
+		RegisterDevice: a.cfg.Auth.RegisterDevice,
+		HIDEndpoint:    a.cfg.Auth.HIDEndpoint,
+		HIDQuery:       a.cfg.Auth.HIDQuery,
+		HIDField:       a.cfg.Auth.HIDField,
+		Logger:         a.log,
 	})
 }
 
@@ -88,12 +92,16 @@ func cmdLogin(a *app, args []string) error {
 	sf.register(fs)
 	user := fs.String("user", "", "账号（覆盖 auth.user）")
 	captcha := fs.String("captcha", "", "图形验证码（网关启用时）")
+	registerDevice := fs.Bool("register-device", false, "网关要求 auth/hid 时提交本机特征码完成设备登记")
 	if err := a.parse(fs, args); err != nil {
 		return err
 	}
 	sf.apply(a)
 	if *user != "" {
 		a.cfg.Auth.User = *user
+	}
+	if *registerDevice {
+		a.cfg.Auth.RegisterDevice = true
 	}
 	if err := a.initLog(); err != nil {
 		return err
@@ -132,7 +140,14 @@ func cmdLogin(a *app, args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*a.g.timeout)
 	defer cancel()
-	tok, err := c.Login(ctx, auth.LoginRequest{User: a.cfg.Auth.User, Password: password, Captcha: *captcha, DeviceID: devID})
+	mac, host := "", ""
+	if a.cfg.Auth.RegisterDevice {
+		mac, host = hidExtras(a)
+	}
+	tok, err := c.Login(ctx, auth.LoginRequest{
+		User: a.cfg.Auth.User, Password: password, Captcha: *captcha,
+		DeviceID: devID, MACAddress: mac, Hostname: host,
+	})
 	password = ""
 	if err != nil {
 		return err
@@ -214,6 +229,10 @@ func (a *app) deviceIDForLogin(prev *auth.Session) (string, error) {
 	case "auto":
 		send = prev != nil && prev.IsHidUser != nil && *prev.IsHidUser == 1
 	}
+	// 开启设备登记时必须带上特征码，否则 hid 这步没东西可提交。
+	if a.cfg.Auth.RegisterDevice {
+		send = true
+	}
 	if !send {
 		return "", nil
 	}
@@ -232,3 +251,6 @@ func (a *app) deviceIDForLogin(prev *auth.Session) (string, error) {
 var deviceID = func(*app) (string, error) {
 	return "", errors.New("设备标识模块未接入")
 }
+
+// hidExtras 取 auth/hid 登记要连同特征码上报的本机 MAC 与主机名；由 devid 子命令接入。
+var hidExtras = func(*app) (mac, host string) { return "", "" }

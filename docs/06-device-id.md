@@ -90,6 +90,7 @@ device_id = upper(hex(md5(plaintext)))
 
 - 只在登录流程中发送，不做其他用途；是否发送由 `auth.send_device_id` 决定（`docs/09` §3）
 - 登录表单字段名原始资料未给出（TODO(待实测)），取 `auth.device_id_field`，默认 `devid`，发送时打 `assumption=device_id_field`
+- 网关要求 `auth/hid` 二次认证（特征码登记）时另走一次提交，字段名取 `auth.hid_field`（默认 `svpn_inputhid`）、端点取 `auth.hid_endpoint`，并连同本机 `macaddress`（`devid.PrimaryMAC`，大写冒号分隔）与 `hostname`（`os.Hostname`）一起上报（官方模板变量 `hid`/`macaddress`/`hostname` 并列）；均为待实测假设点，见 `docs/02` §4
 - `auto` 依据**上次登录**缓存在会话文件里的 `Other.isHidUser`：`isHidUser` 来自 `conf.csp`，只有登录之后才拿得到
 - 日志里掩码显示（保留首尾各 4 字符）
 - `status --json` 默认不包含该字段，需显式 `--show-devid`

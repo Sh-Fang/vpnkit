@@ -49,6 +49,17 @@ func TestBuildPlaintextCases(t *testing.T) {
 	}
 }
 
+func TestPrimaryMAC(t *testing.T) {
+	// 排序后第一张物理网卡是 eth0；虚拟/回环全排除；大写冒号分隔。
+	mac, ok := PrimaryMAC(&fakeSource{ifs: physical})
+	if !ok || mac != "AA:BB:CC:DD:EE:01" {
+		t.Fatalf("PrimaryMAC = %q %v", mac, ok)
+	}
+	if _, ok := PrimaryMAC(&fakeSource{ifs: physical[2:3]}); ok {
+		t.Error("只有回环网卡时不应返回 MAC")
+	}
+}
+
 func TestComputeMAC(t *testing.T) {
 	id, err := Compute(&fakeSource{ifs: physical})
 	if err != nil {

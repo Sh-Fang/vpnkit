@@ -34,6 +34,31 @@ func extractFields(body []byte, names ...string) map[string]string {
 	return res
 }
 
+var reOpenTag = regexp.MustCompile(`<([A-Za-z][\w.\-]*)(?:\s[^>]*)?>`)
+
+var reCSRFVal = regexp.MustCompile(`(?is)(<CSRF_RAND_CODE>)[^<]*(</CSRF_RAND_CODE>)`)
+
+// maskCSRFBody 把响应体里的 CSRF 值掩掉后返回，供 trace 打印完整 XML（含属性）而不泄露令牌。
+func maskCSRFBody(body []byte) string {
+	return reCSRFVal.ReplaceAllString(string(body), "${1}***${2}")
+}
+
+// tagNames 返回响应体中按首次出现顺序去重的 XML 标签名，只取名字、不取值，
+// 用于二次认证探测（docs/02 §4）：联调时知道网关这一步声明了哪些字段，而不泄露任何令牌值。
+func tagNames(body []byte) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range reOpenTag.FindAllStringSubmatch(string(body), -1) {
+		name := m[1]
+		if strings.EqualFold(name, "xml") || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
+}
+
 func flattenJSON(m map[string]any, out map[string]string) {
 	for k, v := range m {
 		switch t := v.(type) {

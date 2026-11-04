@@ -19,7 +19,7 @@ import (
 	"github.com/Sh-Fang/vpnkit/testserver"
 )
 
-func newGateway(t *testing.T, cfg testserver.AuthConfig) (*testserver.AuthServer, *Client) {
+func newGateway(t *testing.T, cfg testserver.AuthConfig, opts ...func(*Options)) (*testserver.AuthServer, *Client) {
 	t.Helper()
 	if cfg.Users == nil {
 		cfg.Users = map[string]string{"alice": "s3cret"}
@@ -32,7 +32,11 @@ func newGateway(t *testing.T, cfg testserver.AuthConfig) (*testserver.AuthServer
 	t.Cleanup(srv.Close)
 	host, portS, _ := net.SplitHostPort(srv.Listener.Addr().String())
 	port, _ := strconv.Atoi(portS)
-	c, err := New(Options{Server: host, Port: port, HTTPClient: srv.Client(), Timeout: 5 * time.Second})
+	o := Options{Server: host, Port: port, HTTPClient: srv.Client(), Timeout: 5 * time.Second}
+	for _, f := range opts {
+		f(&o)
+	}
+	c, err := New(o)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,6 +174,17 @@ func TestExtractFields(t *testing.T) {
 	}
 	if _, ok := extractFields([]byte("<html>nothing</html>"), "TwfID")["TwfID"]; ok {
 		t.Error("should be missing")
+	}
+}
+
+func TestTagNames(t *testing.T) {
+	body := `<?xml version="1.0" encoding="utf-8"?><Auth><ErrorCode>1</ErrorCode>` +
+		`<Message>ok</Message><NextAuth>4</NextAuth><NextService>auth/hid</NextService>` +
+		`<NextAuth>dup</NextAuth><Field name="x"/></Auth>`
+	got := tagNames([]byte(body))
+	want := []string{"Auth", "ErrorCode", "Message", "NextAuth", "NextService", "Field"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("tagNames = %v, want %v", got, want)
 	}
 }
 
@@ -311,6 +326,71 @@ func TestLoginSecondFactorRequired(t *testing.T) {
 	_, c := newGateway(t, testserver.AuthConfig{NextAuth: "2"})
 	_, err := c.Login(context.Background(), LoginRequest{User: "alice", Password: "s3cret"})
 	if !errors.Is(err, ErrSecondFactor) || !errors.Is(err, vpnerr.ErrAuth) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+const testDevID = "3F2A9C14B7E08D5612AB44CD990E7F31"
+
+func TestLoginHIDRegisterSuccess(t *testing.T) {
+	as, c := newGateway(t, testserver.AuthConfig{NextAuth: "4", NextService: "auth/hid"},
+		func(o *Options) { o.RegisterDevice = true })
+	tok, err := c.Login(context.Background(), LoginRequest{User: "alice", Password: "s3cret", DeviceID: testDevID})
+	if err != nil {
+		t.Fatalf("hid login: %v", err)
+	}
+	if !as.ValidToken(tok) {
+		t.Fatalf("token %q not registered after hid", tok)
+	}
+	f := as.LastHIDForm()
+	if f.Get("svpn_inputhid") != testDevID {
+		t.Errorf("hid form 未带特征码: %v", f)
+	}
+	if f.Get("svpn_req_randcode") == "" {
+		t.Errorf("hid form 未带 CSRF: %v", f)
+	}
+}
+
+func TestLoginHIDFieldSweep(t *testing.T) {
+	// 网关只认第二候选 svpn_hid：客户端首发 svpn_inputhid 被拒 param error 后应自动换候选成功。
+	as, c := newGateway(t, testserver.AuthConfig{NextAuth: "4", NextService: "auth/hid", HIDField: "svpn_hid"},
+		func(o *Options) { o.RegisterDevice = true })
+	tok, err := c.Login(context.Background(), LoginRequest{User: "alice", Password: "s3cret", DeviceID: testDevID})
+	if err != nil {
+		t.Fatalf("hid sweep login: %v", err)
+	}
+	if !as.ValidToken(tok) {
+		t.Fatalf("token %q not registered", tok)
+	}
+	if as.LastHIDForm().Get("svpn_hid") != testDevID {
+		t.Errorf("未用正确候选字段提交: %v", as.LastHIDForm())
+	}
+}
+
+func TestLoginHIDWithoutRegisterDevice(t *testing.T) {
+	// 没开 register_device 时，hid 这步仍报 ErrSecondFactor，不静默登记。
+	_, c := newGateway(t, testserver.AuthConfig{NextAuth: "4", NextService: "auth/hid"})
+	_, err := c.Login(context.Background(), LoginRequest{User: "alice", Password: "s3cret", DeviceID: testDevID})
+	if !errors.Is(err, ErrSecondFactor) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestLoginHIDNeedsDeviceID(t *testing.T) {
+	_, c := newGateway(t, testserver.AuthConfig{NextAuth: "4", NextService: "auth/hid"},
+		func(o *Options) { o.RegisterDevice = true })
+	_, err := c.Login(context.Background(), LoginRequest{User: "alice", Password: "s3cret"})
+	if !errors.Is(err, ErrNeedDeviceID) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestLoginHIDPendingApproval(t *testing.T) {
+	// 网关期望另一台机器的特征码 → 本机未登记 → 进审批队列。
+	_, c := newGateway(t, testserver.AuthConfig{NextAuth: "4", NextService: "auth/hid", HIDExpectDevID: "00000000000000000000000000000000"},
+		func(o *Options) { o.RegisterDevice = true })
+	_, err := c.Login(context.Background(), LoginRequest{User: "alice", Password: "s3cret", DeviceID: testDevID})
+	if !errors.Is(err, ErrDevicePending) {
 		t.Fatalf("got %v", err)
 	}
 }

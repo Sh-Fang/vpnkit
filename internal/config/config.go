@@ -37,6 +37,12 @@ type Auth struct {
 	SendDeviceID string `toml:"send_device_id"` // auto | always | never
 	// 设备标识在登录表单中的字段名。原始资料未给出，属假设点 device_id_field。
 	DeviceIDField string `toml:"device_id_field"`
+	// 网关要求 auth/hid 二次认证（特征码登记）时的提交参数。线格式无处可查，
+	// 按命名规律给默认值，真机联调据网关响应回填（docs/02 §4、docs/06 §6）。
+	RegisterDevice bool   `toml:"register_device"` // true 时自动提交本机特征码完成 hid 登记
+	HIDEndpoint    string `toml:"hid_endpoint"`    // 默认 /por/login_hid.csp
+	HIDQuery       string `toml:"hid_query"`       // hid 请求的 URL 查询串，默认 apiversion=1（对齐 sms 流程）
+	HIDField       string `toml:"hid_field"`       // 特征码字段名，默认 svpn_inputhid
 }
 
 type Tunnel struct {
@@ -94,6 +100,9 @@ func Default() *Config {
 			MitmField:     "mitm_result",
 			SendDeviceID:  "auto",
 			DeviceIDField: "devid",
+			HIDEndpoint:   "/por/login_hid.csp",
+			HIDQuery:      "apiversion=1",
+			HIDField:      "svpn_inputhid",
 		},
 		Tunnel: Tunnel{
 			MTU:               1400,

@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/Sh-Fang/vpnkit/internal/devid"
@@ -15,6 +16,11 @@ func init() {
 	deviceID = func(a *app) (string, error) {
 		id, _, err := devid.Get(a.dir, devid.SystemSource{})
 		return id, err
+	}
+	hidExtras = func(a *app) (string, string) {
+		mac, _ := devid.PrimaryMAC(devid.SystemSource{})
+		host, _ := os.Hostname()
+		return mac, host
 	}
 }
 
