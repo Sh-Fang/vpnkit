@@ -419,3 +419,28 @@ func TestLoginHIDPendingApproval(t *testing.T) {
 		t.Errorf("绑定申请没带上主机名/MAC: %v", q)
 	}
 }
+
+// TestCertVerifyFailureHints 验证证书校验失败时给出可操作提示与实际指纹，
+// 而不是把 Go 的原始 x509 报错直接甩给用户。
+func TestCertVerifyFailureHints(t *testing.T) {
+	// 假网关用的是自签证书；客户端不带 ca_file/cert_sha256，校验必然失败。
+	as, _ := testserver.NewAuthServer(testserver.AuthConfig{Users: map[string]string{"alice": "pw"}})
+	srv := httptest.NewTLSServer(as.Handler())
+	defer srv.Close()
+	host, portS, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	port, _ := strconv.Atoi(portS)
+	c, err := New(Options{Server: host, Port: port})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Login(context.Background(), LoginRequest{User: "alice", Password: "pw"})
+	if err == nil {
+		t.Fatal("期望证书校验失败")
+	}
+	msg := err.Error()
+	for _, want := range []string{"--cert-sha256", "--insecure", "SHA-256"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("提示里缺少 %q: %v", want, err)
+		}
+	}
+}

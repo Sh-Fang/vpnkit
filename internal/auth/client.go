@@ -550,10 +550,37 @@ func (c *Client) do(ctx context.Context, method, path, token string, body io.Rea
 	c.log.Debug("HTTP 请求", "method", method, "path", strings.SplitN(path, "?", 2)[0])
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("请求 %s: %w", strings.SplitN(path, "?", 2)[0], err)
+		return nil, fmt.Errorf("请求 %s: %w%s", strings.SplitN(path, "?", 2)[0], err, certHint(err))
 	}
 	c.log.Debug("HTTP 响应", "path", strings.SplitN(path, "?", 2)[0], "status", resp.StatusCode)
 	return resp, nil
+}
+
+// certHint 在证书校验失败时补一句可操作的提示，并打出服务端实际出示的指纹。
+// 这类网关的出厂证书自签、只有 CN 没有 SAN，标准校验必然失败；用户拿到指纹后钉住即可，
+// 比一律 --insecure 更安全（docs/02 §4 证书一节）。
+func certHint(err error) string {
+	var cve *tls.CertificateVerificationError
+	if !errors.As(err, &cve) || len(cve.UnverifiedCertificates) == 0 {
+		return ""
+	}
+	fp := sha256.Sum256(cve.UnverifiedCertificates[0].Raw)
+	s := colonHex(fp[:])
+	return fmt.Sprintf("；网关证书校验失败（自签或名字不匹配属常见情况）。"+
+		"实际 SHA-256 指纹 %s，加 --cert-sha256 %s 只信任这一张证书；"+
+		"确认网络可信时才用 --insecure 跳过校验", s, s)
+}
+
+// colonHex 把字节串格式化成大写、冒号分隔的十六进制。
+func colonHex(b []byte) string {
+	var sb strings.Builder
+	for i, x := range b {
+		if i > 0 {
+			sb.WriteByte(':')
+		}
+		fmt.Fprintf(&sb, "%02X", x)
+	}
+	return sb.String()
 }
 
 func firstNonEmpty(ss ...string) string {
