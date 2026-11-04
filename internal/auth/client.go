@@ -196,6 +196,11 @@ type LoginRequest struct {
 
 // Login 执行 docs/02 §1 的第 1–3 步，返回登录后的会话令牌。
 func (c *Client) Login(ctx context.Context, req LoginRequest) (string, error) {
+	return c.login(ctx, req, 0)
+}
+
+// login 是 Login 的实现；depth 限制「提交设备绑定后重跑登录」的递归深度，最多重跑一次。
+func (c *Client) login(ctx context.Context, req LoginRequest, depth int) (string, error) {
 	body, _, err := c.get(ctx, "/por/login_auth.csp", "")
 	if err != nil {
 		return "", err
@@ -298,7 +303,7 @@ func (c *Client) Login(ctx context.Context, req LoginRequest) (string, error) {
 		// auth/hid 是硬件特征码二次认证（docs/02 §4、docs/06）。仅在用户显式开启 register_device
 		// 时提交本机特征码，否则报错——避免普通登录静默把机器登记进网关的设备绑定队列。
 		if isHIDStep(rf["NextAuth"], rf["NextService"]) && c.o.RegisterDevice {
-			return c.submitHID(ctx, initial, rf["CSRF_RAND_CODE"], req)
+			return c.completeHID(ctx, initial, rf["CSRF_RAND_CODE"], req, depth)
 		}
 		hint := ""
 		if isHIDStep(rf["NextAuth"], rf["NextService"]) {
@@ -381,37 +386,46 @@ func (c *Client) submitHID(ctx context.Context, token, csrf string, req LoginReq
 	logx.Assumption(c.log, "hid_result", res.fields["Result"],
 		"error_code", res.code, "next_auth", res.fields["NextAuth"], "message", res.message,
 		"twfid_in_response", res.token != "")
-	if res.ok {
-		if res.fields["NextAuth"] != "" && res.fields["NextAuth"] != "-1" {
-			return "", fmt.Errorf("%w: %w（特征码通过后仍需 NextAuth=%s NextService=%s）",
-				vpnerr.ErrAuth, ErrSecondFactor, res.fields["NextAuth"], res.fields["NextService"])
+	if !res.ok {
+		if res.code == hidParamErrCode {
+			// 请求本身不合法：把网关那张特征码页读回来（只读 GET），它的回执最权威。
+			c.dumpHIDPage(ctx, token)
+			return "", fmt.Errorf("%w: %w（网关判 param error：字段 %q 或取值不被接受；"+
+				"确认 auth.hid_field 与 auth.hid_query，特征码须为 32 位大写十六进制）",
+				vpnerr.ErrAuth, ErrDevicePending, c.o.HIDField)
 		}
-		return firstNonEmpty(res.token, token), nil
-	}
-
-	// 被判参数错误说明请求本身不合法，再拿同样的形状去提交申请没有意义：
-	// 直接把网关那张特征码页读回来（只读 GET），它的表单才是权威字段清单。
-	if res.code == hidParamErrCode {
-		c.dumpHIDPage(ctx, token)
-		return "", fmt.Errorf("%w: %w（网关判 param error：字段 %q 或取值不被接受；"+
-			"确认 auth.hid_field 与 auth.hid_query，特征码须为 32 位大写十六进制）",
-			vpnerr.ErrAuth, ErrDevicePending, c.o.HIDField)
-	}
-
-	// 其余失败：认证步骤本身不负责登记，要另发一次绑定申请才会进管理员审批队列
-	// （docs/02 §4.2）。界面 SDK 在同样位置的原话就是「login error by hardid, maybe need submit」。
-	regTok, regErr := c.submitHIDRegistration(ctx, token, req)
-	switch {
-	case regErr == nil:
-		return regTok, nil
-	case errors.Is(regErr, ErrDevicePending):
-		// 申请已送达、停在等审批——这不是提交失败，直接把网关原话透传上去。
-		return "", regErr
-	default:
-		c.log.Warn("提交设备绑定申请失败", "err", regErr)
 		return "", fmt.Errorf("%w: %w（网关消息：%s）",
 			vpnerr.ErrAuth, ErrDevicePending, firstNonEmpty(res.message, "无"))
 	}
+	if res.fields["NextAuth"] != "" && res.fields["NextAuth"] != "-1" {
+		return "", fmt.Errorf("%w: %w（特征码通过后仍需 NextAuth=%s NextService=%s）",
+			vpnerr.ErrAuth, ErrSecondFactor, res.fields["NextAuth"], res.fields["NextService"])
+	}
+	return firstNonEmpty(res.token, token), nil
+}
+
+// completeHID 走完特征码这步：先认证，认证不过再提交设备绑定，绑定成功后重跑一次登录。
+//
+// 为什么要重跑：网关的特征码页明确写着「直接点击下方提交即可，会自动审核」——
+// 即设备绑定是独立的一步，认证通过与否取决于「这台机器在不在册」。提交成功之后
+// 重新走一遍密码登录，这一回网关就不再要特征码了（docs/02 §4.2）。
+func (c *Client) completeHID(ctx context.Context, token, csrf string, req LoginRequest, depth int) (string, error) {
+	tok, authErr := c.submitHID(ctx, token, csrf, req)
+	if authErr == nil {
+		return tok, nil
+	}
+	if depth >= 1 || req.DeviceID == "" {
+		return "", authErr
+	}
+	if _, regErr := c.submitHIDRegistration(ctx, token, req); regErr != nil {
+		if errors.Is(regErr, ErrDevicePending) {
+			return "", regErr
+		}
+		c.log.Warn("提交设备绑定申请失败", "err", regErr)
+		return "", authErr
+	}
+	c.log.Info("设备已提交绑定，重试一次登录")
+	return c.login(ctx, req, depth+1)
 }
 
 // dumpHIDPage 取一次特征码页（GET /por/hardid.csp?manual_submit=1）。

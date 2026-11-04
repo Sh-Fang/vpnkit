@@ -35,9 +35,11 @@ type AuthConfig struct {
 	HIDRejectFirstCSRF bool
 	// HardIDPage 是 /por/hardid.csp 返回的页面内容，诊断用。
 	HardIDPage string
-	Captcha    bool
-	ConfXML    string
-	RCList     string
+	// AutoApproveHID 表示 submithid.csp 提交即自动审核通过：之后 login_psw 不再要特征码。
+	AutoApproveHID bool
+	Captcha        bool
+	ConfXML        string
+	RCList         string
 }
 
 type hidState struct {
@@ -60,6 +62,7 @@ type AuthServer struct {
 	pending        map[string]pending
 	hidPending     map[string]hidState // twf → 等待 hid 提交的会话
 	sessions       map[string]string   // token → user
+	hidBound       bool
 	lastForm       url.Values
 	lastHID        url.Values
 	lastHIDCookies map[string]string
@@ -250,7 +253,10 @@ func (s *AuthServer) loginPsw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 特征码登记：成功后不立即发会话，改为下发 NextService=auth/hid + 新 CSRF，等 hid 提交。
-	if s.cfg.NextAuth != "" && strings.Contains(s.cfg.NextService, "hid") {
+	s.mu.Lock()
+	bound := s.hidBound
+	s.mu.Unlock()
+	if s.cfg.NextAuth != "" && strings.Contains(s.cfg.NextService, "hid") && !bound {
 		csrf := strings.ToUpper(randHex(8))
 		s.mu.Lock()
 		s.hidPending[twf] = hidState{csrf: csrf, user: user}
@@ -259,7 +265,8 @@ func (s *AuthServer) loginPsw(w http.ResponseWriter, r *http.Request) {
 			s.cfg.NextAuth, s.cfg.NextService, csrf)
 		return
 	}
-	if s.cfg.KeepTwfID || s.cfg.NextAuth != "" {
+	// 设备已绑定（或本来就不要求特征码）后，这一支只保留 KeepTwfID 的语义，不再下发 NextAuth。
+	if s.cfg.KeepTwfID || (s.cfg.NextAuth != "" && !bound) {
 		s.mu.Lock()
 		s.sessions[twf] = user
 		s.mu.Unlock()
@@ -381,7 +388,10 @@ func (s *AuthServer) submitHID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if s.cfg.HIDExpectDevID != "" && r.PostForm.Get("hid") == s.cfg.HIDExpectDevID {
+	if s.cfg.AutoApproveHID || (s.cfg.HIDExpectDevID != "" && r.PostForm.Get("hid") == s.cfg.HIDExpectDevID) {
+		s.mu.Lock()
+		s.hidBound = true
+		s.mu.Unlock()
 		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>1</Result><Message>already bound</Message></Auth>`)
 		return
 	}

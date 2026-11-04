@@ -141,8 +141,24 @@ hid=<特征码>&hostname=<主机名>&macaddress=<MAC>
 
 三个字段都在表单体里，没有查询串，也没有 `ignore`。`macaddress` 同样是冒号分隔。
 
-因此实现分两段：先 `login_hid.csp` 认证；失败且非 `20210` 时，若开启了设备提交，再发一次绑定申请，
-把网关消息透传给用户并报 `ErrDevicePending`（退出码 3），提示等待管理员审批。
+网关的特征码页（`GET /por/hardid.csp?manual_submit=1`）会直接说明该走哪条路，典型回执：
+
+```xml
+<Result>2</Result>
+<ErrorCode>1</ErrorCode>
+<Message>get hard id auth type success</Message>
+<ADMIN_HINT>直接点击下方提交即可，会自动审核</ADMIN_HINT>
+```
+
+`ADMIN_HINT` 是给人看的，但它也是权威的流程说明：**设备没在册时认证必然不过，正确动作是提交绑定**。
+
+因此实现按三段走：
+
+1. `login_hid.csp` 认证。通过则直接完成。
+2. 不通过（任何原因，含 `20210`）→ 提交 `submithid.csp`。
+3. 提交成功且该网关自动审核 → **重跑一次登录**（递归深度上限 1），这一回网关不再要特征码。
+
+提交后若网关要管理员审批，则报 `ErrDevicePending`（退出码 3）并把网关消息透传出来。
 
 ### 4.2.1 取特征码的本地接口
 

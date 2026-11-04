@@ -371,15 +371,19 @@ func TestLoginHIDRegisterSuccess(t *testing.T) {
 }
 
 func TestLoginHIDParamError(t *testing.T) {
-	// 网关要求的字段名与默认值不同 → 20210；错误要能指向 hid_field 配置项。
-	_, c := newGateway(t, testserver.AuthConfig{NextAuth: "4", NextService: "auth/hid", HIDField: "svpn_inputhid"},
+	// 认证这步被拒（20210）时，按网关特征码页的提示改走绑定申请；
+	// 这里网关要管理员审批，于是停在「等待审批」。
+	as, c := newGateway(t, testserver.AuthConfig{NextAuth: "4", NextService: "auth/hid", HIDField: "svpn_inputhid"},
 		func(o *Options) { o.RegisterDevice = true })
-	_, err := c.Login(context.Background(), LoginRequest{User: "alice", Password: "s3cret", DeviceID: testDevID})
+	_, err := c.Login(context.Background(), LoginRequest{
+		User: "alice", Password: "s3cret", DeviceID: testDevID,
+		MACAddress: "AA:BB:CC:DD:EE:01", Hostname: "test-host",
+	})
 	if !errors.Is(err, ErrDevicePending) {
 		t.Fatalf("got %v", err)
 	}
-	if !strings.Contains(err.Error(), "hid_field") {
-		t.Errorf("错误应指向 hid_field 配置项: %v", err)
+	if as.LastSubmitHID() == nil {
+		t.Error("认证被拒后应尝试提交绑定申请")
 	}
 }
 
@@ -471,5 +475,27 @@ func TestLoginHIDCSRFRetry(t *testing.T) {
 	}
 	if !as.ValidToken(tok) {
 		t.Fatalf("token %q 未登记", tok)
+	}
+}
+
+// TestLoginHIDAutoApprove 覆盖网关「提交即自动审核」的形态（docs/02 §4.2）：
+// 特征码认证不过 → 提交绑定申请成功 → 重跑一次登录，这回不再要特征码。
+func TestLoginHIDAutoApprove(t *testing.T) {
+	as, c := newGateway(t, testserver.AuthConfig{
+		NextAuth: "4", NextService: "auth/hid", AutoApproveHID: true,
+		HIDExpectDevID: "00000000000000000000000000000000", // 认证必失败，逼出「提交→自动审核」
+	}, func(o *Options) { o.RegisterDevice = true })
+	tok, err := c.Login(context.Background(), LoginRequest{
+		User: "alice", Password: "s3cret", DeviceID: testDevID,
+		MACAddress: "AA:BB:CC:DD:EE:01", Hostname: "test-host",
+	})
+	if err != nil {
+		t.Fatalf("自动审核流程登录失败: %v", err)
+	}
+	if !as.ValidToken(tok) {
+		t.Fatalf("token %q 未登记", tok)
+	}
+	if as.LastSubmitHID() == nil {
+		t.Error("应当提交过绑定申请")
 	}
 }
