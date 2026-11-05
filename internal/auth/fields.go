@@ -36,6 +36,18 @@ func extractFields(body []byte, names ...string) map[string]string {
 
 var reOpenTag = regexp.MustCompile(`<([A-Za-z][\w.\-]*)(?:\s[^>]*)?>`)
 
+// rootTag 返回正文首个元素的名字，判定不出时返回空。
+//
+// 网关用根元素区分三类回执：<Auth> 是状态回执（成功也是它，靠 ErrorCode 区分）、
+// <Conf> 是配置、<Resource> 是资源列表。只按根元素判断，避免把配置里的同名字段当状态码
+// （docs/02 §5.1）。
+func rootTag(body []byte) string {
+	if m := reOpenTag.FindStringSubmatch(string(body)); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
 var reCSRFVal = regexp.MustCompile(`(?is)(<CSRF_RAND_CODE>)[^<]*(</CSRF_RAND_CODE>)`)
 
 // maskCSRFBody 把响应体里的 CSRF 值掩掉后返回，供 trace 打印完整 XML（含属性）而不泄露令牌。

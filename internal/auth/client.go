@@ -696,7 +696,33 @@ func (c *Client) authedGet(ctx context.Context, path, token string) ([]byte, err
 	case status != http.StatusOK:
 		return nil, fmt.Errorf("%w: %s HTTP %d", ErrBadResponse, path, status)
 	}
+	if err := authEnvelopeError(path, b); err != nil {
+		return nil, err
+	}
 	return b, nil
+}
+
+// authEnvelopeError 把网关写在正文里的业务错误翻成可判断的错误（docs/02 §5.1）。
+//
+// 网关对"这个令牌不认"的回执是 HTTP 200 + <Auth><ErrorCode>20026</ErrorCode>，
+// 状态码看不出任何异常。只看状态码的代价是：过期令牌让 conf.csp 解析出一份空配置、
+// 让 rclist.csp 退化成逐行文本，最后报"资源列表中没有可路由的内网网段"——
+// 把"令牌过期"误导成"网关没下发内网段"，排查方向完全跑偏。
+func authEnvelopeError(path string, body []byte) error {
+	if rootTag(body) != "Auth" {
+		return nil
+	}
+	f := extractFields(body, "ErrorCode", "Message", "Note")
+	code := strings.TrimSpace(f["ErrorCode"])
+	if code == "" || code == "1" {
+		return nil
+	}
+	short := strings.SplitN(path, "?", 2)[0]
+	msg := firstNonEmpty(f["Message"], f["Note"], "网关未给出原因")
+	if code == "20026" {
+		return fmt.Errorf("%w: %w（%s：%s）", vpnerr.ErrAuth, ErrSessionExpired, short, msg)
+	}
+	return fmt.Errorf("%w: %s 返回 ErrorCode=%s（%s）", vpnerr.ErrAuth, short, code, msg)
 }
 
 func (c *Client) get(ctx context.Context, path, token string) ([]byte, int, error) {

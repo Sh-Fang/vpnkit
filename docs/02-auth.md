@@ -267,6 +267,33 @@ POST /por/login_sms.csp                                               取短信�
 - 收到鉴权失败时删除该文件并返回退出码 3
 - 不同 `--server` 的令牌分文件存放：`session-<host>.json`
 
+### 5.1 失效怎么判（实测）
+
+网关对"不认这个令牌"的回执是 **HTTP 200 + 正文里的错误码**，状态码本身不带信息：
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<Auth>
+	<Message><![CDATA[unexpected user service]]></Message>
+	<ErrorCode>20026</ErrorCode>
+</Auth>
+<!--randmac=…--><!--hashmac=…-->
+```
+
+`/por/conf.csp` 和 `/por/rclist.csp` 都是这个形状。所以判定分两层：
+
+1. 状态码 401 / 403 / 3xx → 失效；
+2. 状态码 200 时再看**根元素**：根是 `<Auth>` 且 `ErrorCode` 不为 `1` → 业务错误。
+   `20026` 归为会话失效（退出码 3），其它码连错误码和网关原文一起报出。
+
+只看根元素，是因为三类回执的根不同：`<Auth>` 状态、`<Conf>` 配置、`<Resource>` 资源列表。
+按标签名全局搜索会误判——配置正文里同样可能出现 `ErrorCode` 一类的字段。
+
+**反例（联调实例）**：早期实现只查状态码。一份放了 13 小时的令牌让 `conf.csp` 解析出一份空配置
+（日志里 `is_hid_user=0 present=false` 就是这么来的）、让 `rclist.csp` 退化成逐行文本，
+最后报"资源列表中没有可路由的内网网段"。现象指向网关没下发内网段，真因只是令牌过期。
+这类的误判在联调期代价特别高：会把排查方向整个带偏。
+
 ## 6. 测试
 
 用 `testserver/` 的假网关覆盖：

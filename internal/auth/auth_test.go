@@ -154,6 +154,85 @@ func TestExpiredToken401(t *testing.T) {
 	}
 }
 
+// TestExpiredTokenHTTP200 覆盖真网关的实际行为：令牌失效时 HTTP 仍是 200，
+// 错误码只在正文里（docs/02 §5.1）。漏判会让过期表现成"网关没下发内网段"。
+func TestExpiredTokenHTTP200(t *testing.T) {
+	as, c := newGateway(t, testserver.AuthConfig{ExpiredAsHTTP200: true})
+	tok, err := c.Login(context.Background(), LoginRequest{User: "alice", Password: "s3cret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	as.Revoke(tok)
+	ctx := context.Background()
+	if _, _, err := c.FetchConf(ctx, tok); !errors.Is(err, ErrSessionExpired) || vpnerr.ExitCode(err) != 3 {
+		t.Fatalf("FetchConf: got %v", err)
+	}
+	if _, err := c.FetchResources(ctx, tok); !errors.Is(err, ErrSessionExpired) || vpnerr.ExitCode(err) != 3 {
+		t.Fatalf("FetchResources: got %v", err)
+	}
+}
+
+func TestAuthEnvelopeError(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantErr bool // false 表示不该判成错误
+		expired bool // true 表示应归为会话失效（退出码 3）
+		msg     string
+	}{
+		{
+			name:    "真网关失效回执",
+			body:    testserver.ExpiredBody(),
+			wantErr: true, expired: true,
+			msg: "unexpected user service",
+		},
+		{
+			name: "状态回执成功",
+			body: `<?xml version="1.0" encoding="utf-8"?><Auth><ErrorCode>1</ErrorCode></Auth>`,
+		},
+		{
+			name: "配置回执不参与判定",
+			body: `<Conf><Other isHidUser="0"/><ErrorCode>0</ErrorCode></Conf>`,
+		},
+		{
+			name: "资源回执不参与判定",
+			body: `<Resource><Rcs><Rc host="10.0.0.0/8"/></Rcs></Resource>`,
+		},
+		{
+			name:    "其它业务错误照实报出",
+			body:    `<Auth><Message>bad param</Message><ErrorCode>20210</ErrorCode></Auth>`,
+			wantErr: true,
+			msg:     "20210",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := authEnvelopeError("/por/conf.csp?x=1", []byte(c.body))
+			if !c.wantErr {
+				if err != nil {
+					t.Fatalf("不该报错，得到 %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("期望报错，得到 nil")
+			}
+			if !errors.Is(err, vpnerr.ErrAuth) {
+				t.Errorf("应可判定为认证类错误：%v", err)
+			}
+			if got := errors.Is(err, ErrSessionExpired); got != c.expired {
+				t.Errorf("ErrSessionExpired=%v，期望 %v：%v", got, c.expired, err)
+			}
+			if !strings.Contains(err.Error(), c.msg) {
+				t.Errorf("错误文本 %q 不含 %q", err.Error(), c.msg)
+			}
+			if strings.Contains(err.Error(), "?x=1") {
+				t.Errorf("错误文本不该带查询串：%q", err.Error())
+			}
+		})
+	}
+}
+
 func TestExtractFields(t *testing.T) {
 	cases := []struct {
 		body string

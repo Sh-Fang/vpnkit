@@ -39,10 +39,24 @@ type AuthConfig struct {
 	AutoApproveHID bool
 	// SMSCode 非空时，密码与特征码都过了之后还要一次短信验证码，值是唯一可用的码（docs/02 §5）。
 	SMSCode string
-	Captcha bool
-	ConfXML string
-	RCList  string
+	// ExpiredAsHTTP200 让需要令牌的端点对失效令牌回 200 + 正文错误码，与真网关一致
+	// （docs/02 §5.1）。默认回 401，保留旧分支的覆盖。
+	ExpiredAsHTTP200 bool
+	Captcha          bool
+	ConfXML          string
+	RCList           string
 }
+
+// expiredBody 是失效令牌的真实回执，含网关附在末尾的 randmac/hashmac 注释。
+const expiredBody = `<?xml version="1.0" encoding="utf-8"?>
+<Auth>
+	<Message><![CDATA[unexpected user service]]></Message>
+	<ErrorCode>20026</ErrorCode>
+</Auth>
+<!--randmac=11b9eafb8b9ae9203162664b8d3d81fa8d88a245--><!--hashmac=03f6455c88b263301c5531011491115a5a2b2864-->`
+
+// ExpiredBody 返回失效令牌的回执正文，供客户端侧测试断言同一份真实报文。
+func ExpiredBody() string { return expiredBody }
 
 type hidState struct {
 	csrf  string
@@ -434,6 +448,12 @@ func (s *AuthServer) LastHIDForm() url.Values {
 func (s *AuthServer) authed(write func(http.ResponseWriter)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.ValidToken(token(r)) {
+			if s.cfg.ExpiredAsHTTP200 {
+				// 真网关对失效令牌回 200，错误码在正文里（docs/02 §5.1）。
+				w.Header().Set("Content-Type", "text/xml")
+				fmt.Fprintf(w, "%s", expiredBody)
+				return
+			}
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
