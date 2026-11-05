@@ -405,6 +405,13 @@ func (c *Client) sendSMSCode(ctx context.Context, token string) error {
 		return err
 	}
 	if !res.ok {
+		// 真网关这个端点会回一个裸的 "0"/"1"，不是 XML。解析不出错误码就说明
+		// 没拿到可判定的回执——此时不能当成发码失败：网关往往已经自动发过一条了
+		// （特征码那步响应里的 SmsResult=1 就是这个意思），用户手机上是有码的。
+		if res.code == "" && res.message == "" {
+			c.log.Debug("发码端点没有返回可解析的回执，按「可能已自动发过」处理")
+			return nil
+		}
 		return fmt.Errorf("网关回执 %s %s", res.code, res.message)
 	}
 	return nil
