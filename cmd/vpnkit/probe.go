@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"encoding/hex"
-	"errors"
 	"flag"
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Sh-Fang/vpnkit/internal/auth"
@@ -80,21 +80,23 @@ func cmdProbe(a *app, args []string) error {
 	}
 
 	// 第 2 步：两种消息长度各试一次，看网关认哪个。
+	// 凭据前段与登录令牌在消息里的偏移随长度不同（docs/03 §4.4），要一并交给掩码。
 	shapes := []struct {
-		name string
-		msg  func() []byte
+		name    string
+		credOff int // 32 字节凭据前段的起点
+		msg     func() []byte
 	}{
-		{"64 字节裸消息", func() []byte { return tunnel.BuildL3(tunnel.L3OpcodeIP, agent, tok, [4]byte{}) }},
-		{"76 字节带前缀", func() []byte { return tunnel.BuildL3Wrapped(tunnel.L3OpcodeIP, agent, tok, [4]byte{}) }},
+		{"64 字节裸消息", 4, func() []byte { return tunnel.BuildL3(tunnel.L3OpcodeIP, agent, tok, [4]byte{}) }},
+		{"76 字节带前缀", 16, func() []byte { return tunnel.BuildL3Wrapped(tunnel.L3OpcodeIP, agent, tok, [4]byte{}) }},
 	}
 	for _, s := range shapes {
 		ip, raw, err := probeOnce(ctx, tcfg, s.msg(), a.g.timeout)
 		if err != nil {
 			fmt.Fprintf(a.stdout, "%s：失败 %v\n", s.name, err)
 			if len(raw) > 0 {
-				fmt.Fprintf(a.stdout, "  回执 %d 字节：%s\n", len(raw), hex.EncodeToString(raw))
+				fmt.Fprintf(a.stdout, "  回执 %d 字节：%s\n", len(raw), hexPreview(raw, 32))
 			}
-			fmt.Fprintf(a.stdout, "  发出：%s\n", hex.EncodeToString(s.msg()))
+			fmt.Fprintf(a.stdout, "  发出：%s\n", hexMaskedCred(s.msg(), s.credOff, 48))
 			continue
 		}
 		fmt.Fprintf(a.stdout, "%s：成功，分配地址 %d.%d.%d.%d（回执 %d 字节）\n",
@@ -104,6 +106,28 @@ func cmdProbe(a *app, args []string) error {
 	return nil
 }
 
+// hexMaskedCred 输出十六进制，但把 [off, off+n) 这段（凭据前段 + 登录令牌）
+// 逐字节打成 `****`。结构照样看得清，凭据不落终端、不进日志文件。
+func hexMaskedCred(b []byte, off, n int) string {
+	var sb strings.Builder
+	for i, x := range b {
+		if i > 0 {
+			sb.WriteByte(' ')
+		}
+		if i >= off && i < off+n {
+			sb.WriteString("****")
+			continue
+		}
+		fmt.Fprintf(&sb, "%02X", x)
+	}
+	return sb.String()
+}
+
+// hexPreview 只打前 n 字节，避免把整条回执（可能含服务端回显）铺满终端。
+func hexPreview(b []byte, n int) string {
+	return hex.EncodeToString(b[:min(n, len(b))])
+}
+
 // probeOnce 建一条隧道连接、发一条消息、读回执。
 func probeOnce(ctx context.Context, cfg tunnel.Config, msg []byte, timeout time.Duration) ([4]byte, []byte, error) {
 	conn, err := tunnel.L3Conn(ctx, cfg)
@@ -111,9 +135,5 @@ func probeOnce(ctx context.Context, cfg tunnel.Config, msg []byte, timeout time.
 		return [4]byte{}, nil, err
 	}
 	defer conn.Close()
-	ip, raw, err := tunnel.QueryIP(conn, msg, timeout)
-	if errors.Is(err, tunnel.ErrL3Reply) {
-		return ip, raw, err
-	}
-	return ip, raw, err
+	return tunnel.QueryIP(conn, msg, timeout)
 }
