@@ -37,9 +37,11 @@ type AuthConfig struct {
 	HardIDPage string
 	// AutoApproveHID 表示 submithid.csp 提交即自动审核通过：之后 login_psw 不再要特征码。
 	AutoApproveHID bool
-	Captcha        bool
-	ConfXML        string
-	RCList         string
+	// SMSCode 非空时，密码与特征码都过了之后还要一次短信验证码，值是唯一可用的码（docs/02 §5）。
+	SMSCode string
+	Captcha bool
+	ConfXML string
+	RCList  string
 }
 
 type hidState struct {
@@ -67,6 +69,11 @@ type AuthServer struct {
 	lastHID        url.Values
 	lastHIDCookies map[string]string
 	lastSubmitHID  url.Values
+	smsPending     map[string]string // twf → user，等待短信验证码
+	smsVerified    map[string]bool
+	lastSMSForm    url.Values
+	lastSMSSend    url.Values
+	smsSendCount   int
 }
 
 func NewAuthServer(cfg AuthConfig) (*AuthServer, error) {
@@ -84,7 +91,8 @@ func NewAuthServer(cfg AuthConfig) (*AuthServer, error) {
 	if cfg.HIDField == "" {
 		cfg.HIDField = "hid"
 	}
-	return &AuthServer{cfg: cfg, keyA: a, keyB: b, pending: map[string]pending{}, hidPending: map[string]hidState{}, sessions: map[string]string{}}, nil
+	return &AuthServer{cfg: cfg, keyA: a, keyB: b, pending: map[string]pending{}, hidPending: map[string]hidState{}, sessions: map[string]string{},
+		smsPending: map[string]string{}, smsVerified: map[string]bool{}}, nil
 }
 
 // ConfXML 返回 docs/09 §3 形态的 conf.csp，隧道端口指向 tunnelPort。
@@ -154,6 +162,8 @@ func (s *AuthServer) Handler() http.Handler {
 	mux.HandleFunc("/por/login_hid.csp", s.loginHID)
 	mux.HandleFunc("/por/submithid.csp", s.submitHID)
 	mux.HandleFunc("/por/hardid.csp", s.hardIDPage)
+	mux.HandleFunc("/por/post_sms.csp", s.postSMS)
+	mux.HandleFunc("/por/login_sms1.csp", s.loginSMS)
 	mux.HandleFunc("/por/conf.csp", s.authed(func(w http.ResponseWriter) { fmt.Fprint(w, s.cfg.ConfXML) }))
 	mux.HandleFunc("/por/rclist.csp", s.authed(func(w http.ResponseWriter) { fmt.Fprint(w, s.cfg.RCList) }))
 	return mux
@@ -265,6 +275,9 @@ func (s *AuthServer) loginPsw(w http.ResponseWriter, r *http.Request) {
 			s.cfg.NextAuth, s.cfg.NextService, csrf)
 		return
 	}
+	if s.smsGate(w, twf, user) {
+		return
+	}
 	// 设备已绑定（或本来就不要求特征码）后，这一支只保留 KeepTwfID 的语义，不再下发 NextAuth。
 	if s.cfg.KeepTwfID || (s.cfg.NextAuth != "" && !bound) {
 		s.mu.Lock()
@@ -348,6 +361,11 @@ func (s *AuthServer) loginHID(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	delete(s.hidPending, twf)
+	s.mu.Unlock()
+	if s.smsGate(w, twf, st.user) {
+		return
+	}
+	s.mu.Lock()
 	s.sessions[twf] = st.user
 	s.mu.Unlock()
 	fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>1</Result><Message>hid auth success</Message></Auth>`)
@@ -422,4 +440,81 @@ func (s *AuthServer) authed(write func(http.ResponseWriter)) http.HandlerFunc {
 		w.Header().Set("Content-Type", "text/xml")
 		write(w)
 	}
+}
+
+// smsGate 在密码与特征码都过了之后判断是否还要短信验证码。
+// 需要时下发挑战并返回 true，调用方不要继续发会话（docs/02 §5）。
+func (s *AuthServer) smsGate(w http.ResponseWriter, twf, user string) bool {
+	if s.cfg.SMSCode == "" {
+		return false
+	}
+	s.mu.Lock()
+	done := s.smsVerified[twf]
+	if !done {
+		s.smsPending[twf] = user
+	}
+	s.mu.Unlock()
+	if done {
+		return false
+	}
+	fmt.Fprint(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>2</Result><ErrorCode>1</ErrorCode><Message>Log in successfully!</Message><NextAuth>2</NextAuth><NextService>auth/sms</NextService><SmsResult>1</SmsResult><SmsIsStillValid>1</SmsIsStillValid><SmsSendInterval>60</SmsSendInterval><PhoneList>****</PhoneList></Auth>`)
+	return true
+}
+
+// postSMS 模拟"请求发送验证码"（官方 SDK 的无手机号分支）。
+func (s *AuthServer) postSMS(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	s.lastSMSSend = r.Form
+	s.smsSendCount++
+	s.mu.Unlock()
+	fmt.Fprint(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>1</Result><ErrorCode>1</ErrorCode><SmsSendInterval>60</SmsSendInterval><SmsIsStillValid>1</SmsIsStillValid></Auth>`)
+}
+
+// loginSMS 模拟验证码提交（官方 SDK 的 /por/login_sms1.csp，字段 svpn_inputsms）。
+func (s *AuthServer) loginSMS(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	twf := token(r)
+	s.mu.Lock()
+	s.lastSMSForm = r.PostForm
+	user, pending := s.smsPending[twf]
+	s.mu.Unlock()
+	if !pending {
+		fmt.Fprint(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>0</Result><ErrorCode>20014</ErrorCode><Message>session timeout</Message></Auth>`)
+		return
+	}
+	if got := r.PostForm.Get("svpn_inputsms"); got != s.cfg.SMSCode {
+		fmt.Fprint(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>0</Result><ErrorCode>20020</ErrorCode><Message>sms code error</Message></Auth>`)
+		return
+	}
+	s.mu.Lock()
+	delete(s.smsPending, twf)
+	s.smsVerified[twf] = true
+	s.mu.Unlock()
+	newID := randHex(8)
+	s.mu.Lock()
+	s.sessions[newID] = user
+	s.mu.Unlock()
+	http.SetCookie(w, &http.Cookie{Name: "TWFID", Value: newID})
+	fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><Auth><Result>1</Result><ErrorCode>1</ErrorCode><Message>login success</Message><TwfID>%s</TwfID></Auth>`, newID)
+}
+
+// LastSMSForm 返回最近一次短信验证码提交的表单。
+func (s *AuthServer) LastSMSForm() url.Values {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastSMSForm
+}
+
+// SMSSendCount 返回网关被请求发码的次数。
+func (s *AuthServer) SMSSendCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.smsSendCount
 }

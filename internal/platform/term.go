@@ -32,3 +32,14 @@ func ReadPassword(prompt string, out io.Writer) (string, error) {
 	}
 	return strings.TrimRight(line, "\r\n"), nil
 }
+
+// ReadLine 读取一行不回显关闭的输入。用于短信验证码这类短时效一次性码：
+// 它不长期有效，掩码只会让用户没法确认自己输对没有。
+func ReadLine(prompt string, out io.Writer, in io.Reader) (string, error) {
+	fmt.Fprint(out, prompt)
+	line, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && !(errors.Is(err, io.EOF) && line != "") {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}

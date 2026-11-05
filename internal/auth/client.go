@@ -85,7 +85,11 @@ type Options struct {
 	// 特征码页端点，只在诊断时只读 GET（docs/02 §4.1）。
 	HardIDEndpoint string
 	HIDLanguage    string
-	Logger         *slog.Logger
+	// 短信二次认证（docs/02 §5）。RequestSMSCode 为 nil 时不支持短信这步。
+	SMSSendEndpoint   string
+	SMSSubmitEndpoint string
+	RequestSMSCode    func(ctx context.Context) (string, error)
+	Logger            *slog.Logger
 	// HTTPClient 非空时覆盖默认客户端（测试用）。
 	HTTPClient *http.Client
 }
@@ -308,6 +312,9 @@ func (c *Client) login(ctx context.Context, req LoginRequest, depth int) (string
 		if isHIDStep(rf["NextAuth"], rf["NextService"]) && c.o.RegisterDevice {
 			return c.completeHID(ctx, initial, rf["CSRF_RAND_CODE"], req, depth)
 		}
+		if isSMSStep(rf["NextAuth"], rf["NextService"]) {
+			return c.completeSMS(ctx, initial)
+		}
 		hint := ""
 		if isHIDStep(rf["NextAuth"], rf["NextService"]) {
 			hint = "；这是特征码二次认证，加 --register-device 可提交本机特征码"
@@ -334,6 +341,87 @@ func isHIDStep(nextAuth, nextService string) bool {
 		return true
 	}
 	return nextAuth == "4"
+}
+
+// isSMSStep 判断二次认证是否为短信验证码这步（docs/02 §5）。
+// 官方 SDK 把验证码提交到 /por/login_sms1.csp，网关通常同时下发 NextService=auth/sms。
+func isSMSStep(nextAuth, nextService string) bool {
+	if strings.Contains(strings.ToLower(nextService), "sms") {
+		return true
+	}
+	return nextAuth == "2"
+}
+
+// completeSMS 走完短信二次认证（docs/02 §5）。
+//
+// 先请求网关发一条验证码，再让调用方问用户要，最后提交。验证码字段名
+// svpn_inputsms 与端点都取自官方 SDK 的 loginSms。发码失败不当成硬错误——
+// 网关可能刚自动发过，用户手机上已经有码。
+func (c *Client) completeSMS(ctx context.Context, token string) (string, error) {
+	if c.o.RequestSMSCode == nil {
+		return "", fmt.Errorf("%w: %w（网关要求短信验证码，但本命令没有可用的输入方式）",
+			vpnerr.ErrAuth, ErrSecondFactor)
+	}
+	if err := c.sendSMSCode(ctx, token); err != nil {
+		c.log.Warn("请求发送短信验证码失败，继续等用户输入", "err", err)
+	}
+	code, err := c.o.RequestSMSCode(ctx)
+	if err != nil {
+		return "", err
+	}
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return "", fmt.Errorf("%w: 短信验证码为空", vpnerr.ErrUsage)
+	}
+
+	form := url.Values{}
+	form.Set("svpn_inputsms", code)
+	res, err := c.postAuthForm(ctx, c.smsSubmitPath(), token, form)
+	if err != nil {
+		return "", err
+	}
+	logx.Assumption(c.log, "sms_result", res.fields["Result"], "error_code", res.code,
+		"message", res.message, "next_auth", res.fields["NextAuth"], "twfid_in_response", res.token != "")
+	if !res.ok {
+		return "", fmt.Errorf("%w: %w（短信验证码被拒：%s）",
+			vpnerr.ErrAuth, ErrSecondFactor, firstNonEmpty(res.message, res.code))
+	}
+	tok := firstNonEmpty(res.token, token)
+	if na, ns := res.fields["NextAuth"], res.fields["NextService"]; na != "" && na != "-1" {
+		return "", fmt.Errorf("%w: %w（短信通过后仍需 NextAuth=%s NextService=%s）",
+			vpnerr.ErrAuth, ErrSecondFactor, na, ns)
+	}
+	return tok, nil
+}
+
+// sendSMSCode 请求网关发一条短信验证码。
+func (c *Client) sendSMSCode(ctx context.Context, token string) error {
+	form := url.Values{}
+	form.Set("phone_number", "")
+	form.Set("phone_index", "0")
+	logx.Assumption(c.log, "sms_send", c.smsSendPath())
+	res, err := c.postAuthForm(ctx, c.smsSendPath(), token, form)
+	if err != nil {
+		return err
+	}
+	if !res.ok {
+		return fmt.Errorf("网关回执 %s %s", res.code, res.message)
+	}
+	return nil
+}
+
+func (c *Client) smsSendPath() string {
+	if c.o.SMSSendEndpoint != "" {
+		return c.o.SMSSendEndpoint
+	}
+	return "/por/post_sms.csp"
+}
+
+func (c *Client) smsSubmitPath() string {
+	if c.o.SMSSubmitEndpoint != "" {
+		return c.o.SMSSubmitEndpoint
+	}
+	return "/por/login_sms1.csp"
 }
 
 // hidParamErrCode 是网关的 "submit param error"，表示这次提交的内容不被接受（docs/02 §4）。
@@ -400,11 +488,16 @@ func (c *Client) submitHID(ctx context.Context, token, csrf string, req LoginReq
 		return "", fmt.Errorf("%w: %w（网关消息：%s）",
 			vpnerr.ErrAuth, ErrDevicePending, firstNonEmpty(res.message, "无"))
 	}
-	if res.fields["NextAuth"] != "" && res.fields["NextAuth"] != "-1" {
+	tok := firstNonEmpty(res.token, token)
+	if na, ns := res.fields["NextAuth"], res.fields["NextService"]; na != "" && na != "-1" {
+		// 特征码这步过了，网关还要下一步（常见是短信）。转交给对应处理器，不要当成失败。
+		if isSMSStep(na, ns) {
+			return c.completeSMS(ctx, tok)
+		}
 		return "", fmt.Errorf("%w: %w（特征码通过后仍需 NextAuth=%s NextService=%s）",
-			vpnerr.ErrAuth, ErrSecondFactor, res.fields["NextAuth"], res.fields["NextService"])
+			vpnerr.ErrAuth, ErrSecondFactor, na, ns)
 	}
-	return firstNonEmpty(res.token, token), nil
+	return tok, nil
 }
 
 // completeHID 走完特征码这步：先认证，认证不过再提交设备绑定，绑定成功后重跑一次登录。

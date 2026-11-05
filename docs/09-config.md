@@ -26,7 +26,9 @@ hid_query      = "manual_submit=1"  # 该端点固定的查询串
 hid_field      = "hid"          # 特征码表单字段名
 hid_language   = "zh_CN"        # 绑定申请里的 language 参数
 hid_echo_csrf  = false          # 特征码表单是否回显 svpn_req_randcode；官方 SDK 不发，默认关（docs/02 §4.1）
-submithid_endpoint = "/por/submithid.csp"  # 设备绑定申请端点，参数走表单体（docs/02 §4.2）
+submithid_endpoint = "/por/submithid.csp"  # 设备绑定申请端点，参数走查询串（docs/02 §4.2）
+sms_send_endpoint  = "/por/post_sms.csp"   # 请求发送短信验证码（docs/02 §4.5）
+sms_submit_endpoint = "/por/login_sms1.csp" # 提交短信验证码
 
 [tunnel]
 mtu                = 1400

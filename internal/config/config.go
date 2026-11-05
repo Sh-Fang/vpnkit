@@ -48,7 +48,9 @@ type Auth struct {
 	// 提交设备绑定申请（进管理员审批队列）的端点，参数走查询串。
 	SubmitHIDEndpoint string `toml:"submithid_endpoint"` // 默认 /por/submithid.csp
 	// 特征码页端点，仅在诊断时只读 GET，用来核对网关要求的字段（docs/02 §4.1）。
-	HardIDEndpoint string `toml:"hardid_endpoint"` // 默认 /por/hardid.csp
+	HardIDEndpoint    string `toml:"hardid_endpoint"`     // 默认 /por/hardid.csp
+	SMSSendEndpoint   string `toml:"sms_send_endpoint"`   // 默认 /por/post_sms.csp
+	SMSSubmitEndpoint string `toml:"sms_submit_endpoint"` // 默认 /por/login_sms1.csp
 }
 
 type Tunnel struct {
@@ -112,6 +114,8 @@ func Default() *Config {
 			HIDLanguage:       "zh_CN",
 			SubmitHIDEndpoint: "/por/submithid.csp",
 			HardIDEndpoint:    "/por/hardid.csp",
+			SMSSendEndpoint:   "/por/post_sms.csp",
+			SMSSubmitEndpoint: "/por/login_sms1.csp",
 		},
 		Tunnel: Tunnel{
 			MTU:               1400,

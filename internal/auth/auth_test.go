@@ -530,3 +530,50 @@ func TestLoginHIDAutoApprove(t *testing.T) {
 		t.Error("应当提交过绑定申请")
 	}
 }
+
+// TestLoginSMSAfterHID 覆盖"特征码过了之后还要短信"这条真实路径（docs/02 §5）。
+func TestLoginSMSAfterHID(t *testing.T) {
+	as, c := newGateway(t, testserver.AuthConfig{
+		NextAuth: "4", NextService: "auth/hid",
+		HIDExpectDevID: testDevID, SMSCode: "123456",
+	}, func(o *Options) {
+		o.RegisterDevice = true
+		o.RequestSMSCode = func(context.Context) (string, error) { return "123456", nil }
+	})
+	tok, err := c.Login(context.Background(), LoginRequest{
+		User: "alice", Password: "s3cret", DeviceID: testDevID,
+		MACAddress: "54-ee-75-e0-3f-c5", Hostname: "b2FzaXMtTGVub3Zv",
+	})
+	if err != nil {
+		t.Fatalf("登录失败: %v", err)
+	}
+	if !as.ValidToken(tok) {
+		t.Fatalf("短信通过后应拿到会话，实得 %q", tok)
+	}
+	if as.SMSSendCount() == 0 {
+		t.Error("应先请求网关发码")
+	}
+	if got := as.LastSMSForm().Get("svpn_inputsms"); got != "123456" {
+		t.Errorf("svpn_inputsms = %q", got)
+	}
+}
+
+func TestLoginSMSWrongCode(t *testing.T) {
+	as, c := newGateway(t, testserver.AuthConfig{
+		NextAuth: "4", NextService: "auth/hid",
+		HIDExpectDevID: testDevID, SMSCode: "123456",
+	}, func(o *Options) {
+		o.RegisterDevice = true
+		o.RequestSMSCode = func(context.Context) (string, error) { return "000000", nil }
+	})
+	_, err := c.Login(context.Background(), LoginRequest{
+		User: "alice", Password: "s3cret", DeviceID: testDevID,
+		MACAddress: "54-ee-75-e0-3f-c5", Hostname: "b2FzaXMtTGVub3Zv",
+	})
+	if !errors.Is(err, ErrSecondFactor) {
+		t.Fatalf("验证码错误应报二次认证失败，实得 %v", err)
+	}
+	if as.LastSMSForm().Get("svpn_inputsms") != "000000" {
+		t.Error("应把用户输入的码原样提交")
+	}
+}

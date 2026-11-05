@@ -85,6 +85,12 @@ func (a *app) authClient() (*auth.Client, error) {
 		HIDField:          a.cfg.Auth.HIDField,
 		HIDLanguage:       a.cfg.Auth.HIDLanguage,
 		EchoHIDCSRF:       a.cfg.Auth.HIDEchoCSRF,
+		SMSSendEndpoint:   a.cfg.Auth.SMSSendEndpoint,
+		SMSSubmitEndpoint: a.cfg.Auth.SMSSubmitEndpoint,
+		RequestSMSCode: func(context.Context) (string, error) {
+			// 验证码是短时效的一次性码，不走掩码；但仍从 stderr 提示，stdout 留给结果。
+			return platform.ReadLine("短信验证码: ", a.stderr, os.Stdin)
+		},
 		SubmitHIDEndpoint: a.cfg.Auth.SubmitHIDEndpoint,
 		HardIDEndpoint:    a.cfg.Auth.HardIDEndpoint,
 		Logger:            a.log,

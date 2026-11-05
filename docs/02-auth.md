@@ -221,6 +221,32 @@ POST /por/submithid.csp?type=cs&language=zh_CN&hid=<特征码>&hostname=<base64 
 - 错误消息要透传给用户（便于自助排查，例如密码错、账号锁定、需图形验证码）
 - **不要**把原始响应体整体打进日志（可能含令牌）
 
+### 4.5 短信二次认证（`NextAuth=2` / `NextService=auth/sms`）
+
+特征码这步通过后，网关还可能要求一次短信验证码。实测账号就是这种情况：
+`login_hid.csp` 回 `<ErrorCode>1</ErrorCode>`、`<Message>Log in successfully!</Message>`，
+但同一个响应里带着 `<NextAuth>2</NextAuth><NextService>auth/sms</NextService>`。
+
+**这里的 `Log in successfully!` 是迷惑性的**：它只表示"特征码这步通过"，
+不代表拿到会话。必须看 `NextAuth`，非空且不等于 `-1` 就还有下一步。
+
+三个端点（取自官方 SDK 的 `loginSms` / `getSmsCode`）：
+
+```
+POST /por/post_sms.csp          phone_number=<手机号>&phone_index=0     请求发码
+POST /por/login_sms1.csp        svpn_inputsms=<验证码>                  提交验证码
+POST /por/login_sms.csp                                               取短信配置（可选）
+```
+
+手上有多个手机号时走另一组：`/por/get_sms.csp` 与 `/por/login_sms2.csp`，
+并带上选中的号码。本实现只覆盖无手机号选择的单号码分支。
+
+发码失败不当作硬错误：网关可能刚自动发过一条（响应里的 `SmsResult=1`、`SmsIsStillValid=1`
+就是这个意思），用户手机上已经有码，此时再报错只会把人挡在门外。
+
+验证码从终端读，**不做掩码**——它是一次性短时效的，看不见反而容易输错。
+`--trace` 下不打印验证码原文，只记 `assumption=sms_result`。
+
 ## 5. 令牌存储
 
 `~/.config/vpnkit/session.json`，权限 `0600`：
