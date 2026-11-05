@@ -8,7 +8,6 @@ import (
 	"net"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/Sh-Fang/vpnkit/internal/auth"
 	"github.com/Sh-Fang/vpnkit/internal/fsutil"
@@ -79,29 +78,56 @@ func cmdProbe(a *app, args []string) error {
 		Log:              a.log,
 	}
 
-	// 第 2 步：两种消息长度各试一次，看网关认哪个。
-	// 凭据前段与登录令牌在消息里的偏移随长度不同（docs/03 §4.4），要一并交给掩码。
-	shapes := []struct {
-		name    string
-		credOff int // 32 字节凭据前段的起点
-		msg     func() []byte
-	}{
-		{"64 字节裸消息", 4, func() []byte { return tunnel.BuildL3(tunnel.L3OpcodeIP, agent, tok, [4]byte{}) }},
-		{"76 字节带前缀", 16, func() []byte { return tunnel.BuildL3Wrapped(tunnel.L3OpcodeIP, agent, tok, [4]byte{}) }},
+	// 第 2 步：查地址。这条连接必须保持打开——网关把地址绑在它上面，
+	// 关掉之后建流会静默无回执（docs/03 §4.4）。
+	qc, err := tunnel.L3Conn(ctx, tcfg)
+	if err != nil {
+		return fmt.Errorf("%w: 建立查询连接失败: %w", vpnerr.ErrTunnel, err)
 	}
-	for _, s := range shapes {
-		ip, raw, err := probeOnce(ctx, tcfg, s.msg(), a.g.timeout)
+	defer qc.Close()
+	if qm, err := tunnel.BuildL3Msg(tunnel.CtSendIP, agent, tok, tunnel.ArgSendIP); err == nil {
+		// 结构留证：凭据段逐字节掩码，其余照打（docs/03 §4.4 的字段位置就是靠这个对出来的）。
+		fmt.Fprintf(a.stdout, "查询消息：[16:48] 为凭据前段（已掩码）%s\n", hexMaskedCred(qm, 16, 48))
+	}
+	ip, sm, err := tunnel.QueryIP(qc, agent, tok, a.g.timeout)
+	if err != nil {
+		return fmt.Errorf("%w: %w", vpnerr.ErrTunnel, err)
+	}
+	fmt.Fprintf(a.stdout, "分配地址：%d.%d.%d.%d（状态码 %d）\n", ip[0], ip[1], ip[2], ip[3], sm.Status)
+	fmt.Fprintf(a.stdout, "  回执载荷：%s\n", hex.EncodeToString(sm.Payload))
+
+	// 第 3 步：开四条流，确认应答码与 docs/03 §4.4 一致。
+	streams := []struct {
+		connType uint32
+		want     int32
+		label    string
+	}{
+		{tunnel.CtStreamDownA, 2, "下行 A"},
+		{tunnel.CtStreamDownB, 2, "下行 B"},
+		{tunnel.CtStreamUpA, 1, "上行 A"},
+		{tunnel.CtStreamUpB, 1, "上行 B"},
+	}
+	for _, s := range streams {
+		conn, err := tunnel.L3Conn(ctx, tcfg)
 		if err != nil {
-			fmt.Fprintf(a.stdout, "%s：失败 %v\n", s.name, err)
-			if len(raw) > 0 {
-				fmt.Fprintf(a.stdout, "  回执 %d 字节：%s\n", len(raw), hexPreview(raw, 32))
-			}
-			fmt.Fprintf(a.stdout, "  发出：%s\n", hexMaskedCred(s.msg(), s.credOff, 48))
+			fmt.Fprintf(a.stdout, "%s（conn_type=%d）：连接失败 %v\n", s.label, s.connType, err)
 			continue
 		}
-		fmt.Fprintf(a.stdout, "%s：成功，分配地址 %d.%d.%d.%d（回执 %d 字节）\n",
-			s.name, ip[0], ip[1], ip[2], ip[3], len(raw))
-		fmt.Fprintf(a.stdout, "  回执前 16 字节：%s\n", hex.EncodeToString(raw[:min(16, len(raw))]))
+		got, err := tunnel.OpenStream(conn, s.connType, agent, tok, ip, s.want, a.g.timeout)
+		if err != nil {
+			fmt.Fprintf(a.stdout, "%s（conn_type=%d）：失败 %v\n", s.label, s.connType, err)
+		} else {
+			fmt.Fprintf(a.stdout, "%s（conn_type=%d）：应答码 %d ✓\n", s.label, s.connType, got.Status)
+		}
+		conn.Close()
+	}
+
+	// 第 4 步：数据面。发一个 DNS 查询看能不能收到回包（docs/03 §5 的帧格式仍待确认）。
+	if len(sm.Payload) >= 12 {
+		var dns [4]byte
+		copy(dns[:], sm.Payload[8:12])
+		fmt.Fprintf(a.stdout, "数据面：回执载荷 [8:12] 是 %d.%d.%d.%d，DNS 帧格式尚未验证，暂不发送\n",
+			dns[0], dns[1], dns[2], dns[3])
 	}
 	return nil
 }
@@ -121,19 +147,4 @@ func hexMaskedCred(b []byte, off, n int) string {
 		fmt.Fprintf(&sb, "%02X", x)
 	}
 	return sb.String()
-}
-
-// hexPreview 只打前 n 字节，避免把整条回执（可能含服务端回显）铺满终端。
-func hexPreview(b []byte, n int) string {
-	return hex.EncodeToString(b[:min(n, len(b))])
-}
-
-// probeOnce 建一条隧道连接、发一条消息、读回执。
-func probeOnce(ctx context.Context, cfg tunnel.Config, msg []byte, timeout time.Duration) ([4]byte, []byte, error) {
-	conn, err := tunnel.L3Conn(ctx, cfg)
-	if err != nil {
-		return [4]byte{}, nil, err
-	}
-	defer conn.Close()
-	return tunnel.QueryIP(conn, msg, timeout)
 }

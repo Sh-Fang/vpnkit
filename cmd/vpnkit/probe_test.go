@@ -27,13 +27,3 @@ func TestHexMaskedCred(t *testing.T) {
 		}
 	}
 }
-
-func TestHexPreview(t *testing.T) {
-	b := []byte{1, 2, 3, 4, 5}
-	if got := hexPreview(b, 2); got != "0102" {
-		t.Fatalf("got %q", got)
-	}
-	if got := hexPreview(b, 99); got != "0102030405" {
-		t.Fatalf("got %q", got)
-	}
-}
